@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Arus Download Companion",
+  "version": "0.1.0",
+  "description": "Hand off downloads to the Arus desktop download manager.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4m9sUthZdceQYnkb3ZjUgl/At/CavAq4YferN4GPdPDeEDHMMcnGCRUD5bdrMV8zgg2Vc3QxNwJCR/FclN+tBoRMsn9zt+Hs7Id6HVRIEB5pA9A5/5Aajq0ofhfvSMyrfu5pbZVIV+WGoJGBJ+g/7HN4RNLt1kvkA+YQh9DysWJKcOkOE+d78d5Y7r8pmaTFpuVedbeBoer5vU4ED6fQeNHmo6m/hr/gaPtK6i/u3N5ULm4cs0GtVU8MgDMuk2JK7AEydeqVVrDUagdhznUBVebhDyhi2NE9nHXAUbq8M9y2+MiC2J+UbpFGDaz7Ky27FRYsSsT6pWMHWYT/4wcHBQIDAQAB",
+  "action": {
+    "default_title": "Arus",
+    "default_popup": "popup/index.html",
+    "default_icon": {
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "icons": {
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "permissions": [
+    "cookies",
+    "contextMenus",
+    "downloads",
+    "nativeMessaging",
+    "notifications",
+    "storage"
+  ],
+  "host_permissions": ["<all_urls>"]
+}

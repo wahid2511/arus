@@ -1,0 +1,75 @@
+{
+  "name": "download-nexus",
+  "version": "0.1.0",
+  "description": "Arus — desktop download manager.",
+  "main": "./out/main/index.js",
+  "author": "GENGHERO",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "tsc --noEmit && electron-vite build",
+    "preview": "electron-vite preview",
+    "dist": "npm run build:extension && npm run build && electron-builder",
+    "build:extension": "npm --prefix extension run build",
+    "build:extension:chrome": "npm --prefix extension run build:chrome",
+    "build:extension:firefox": "npm --prefix extension run build:firefox",
+    "package:extension": "npm --prefix extension run package",
+    "clean": "node ./scripts/clean.mjs",
+    "clean:app": "node ./scripts/clean.mjs app",
+    "clean:extension": "node ./scripts/clean.mjs extension"
+  },
+  "dependencies": {
+    "framer-motion": "^12.42.2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "^5.0.4",
+    "electron": "37.2.6",
+    "electron-builder": "latest",
+    "electron-vite": "^5.0.0",
+    "typescript": "latest",
+    "vite": "^7.3.6"
+  },
+  "build": {
+    "appId": "com.genghero.arus",
+    "productName": "Arus",
+    "icon": "build/icon.png",
+    "files": [
+      "out/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/icon.png",
+        "to": "icon.png"
+      },
+      {
+        "from": "extension/dist/chrome",
+        "to": "extension/chrome"
+      },
+      {
+        "from": "extension/dist/firefox",
+        "to": "extension/firefox"
+      }
+    ],
+    "directories": {
+      "buildResources": "build",
+      "output": "release"
+    },
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        "nsis"
+      ]
+    }
+  },
+  "allowScripts": {
+    "electron@37.2.6": true,
+    "electron-winstaller@5.4.0": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.1": true
+  }
+}

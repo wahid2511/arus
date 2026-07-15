@@ -1,0 +1,22 @@
+{
+  "name": "arus-browser-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "build:chrome": "node ./scripts/build.mjs chrome",
+    "build:firefox": "node ./scripts/build.mjs firefox",
+    "package": "node ./scripts/package.mjs",
+    "clean": "node ../scripts/clean.mjs extension"
+  },
+  "dependencies": {
+    "webextension-polyfill": "^0.12.0"
+  },
+  "devDependencies": {
+    "@types/webextension-polyfill": "^0.12.3",
+    "typescript": "^5.8.3",
+    "vite": "^7.3.6",
+    "web-ext": "^8.6.0"
+  }
+}

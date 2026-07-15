@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Arus</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <img src="icons/icon-48.png" width="28" height="28" alt="" />
+      <div>
+        <strong>Arus</strong>
+        <div id="status" class="muted">Memeriksa…</div>
+      </div>
+    </header>
+
+    <label class="field">
+      <span>URL</span>
+      <input id="url" type="url" placeholder="https://example.com/file.zip" />
+    </label>
+
+    <div class="actions">
+      <button id="send" type="button">Kirim ke Arus</button>
+      <button id="options" type="button" class="ghost">Opsi</button>
+    </div>
+
+    <p id="message" class="message" hidden></p>
+    <script src="popup.js"></script>
+  </body>
+</html>

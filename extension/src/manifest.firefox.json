@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "Arus Download Companion",
+  "version": "0.1.0",
+  "description": "Hand off downloads to the Arus desktop download manager.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "arus@genghero.com",
+      "strict_min_version": "128.0"
+    }
+  },
+  "action": {
+    "default_title": "Arus",
+    "default_popup": "popup/index.html",
+    "default_icon": {
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "background": {
+    "scripts": ["background.js"],
+    "type": "module"
+  },
+  "icons": {
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "permissions": [
+    "cookies",
+    "contextMenus",
+    "downloads",
+    "nativeMessaging",
+    "notifications",
+    "storage"
+  ],
+  "host_permissions": ["<all_urls>"]
+}

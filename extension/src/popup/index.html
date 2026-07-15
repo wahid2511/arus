@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Arus</title>
+    <link rel="stylesheet" href="./popup.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <img src="../icons/icon-48.png" alt="" width="28" height="28" />
+        <div>
+          <h1>Arus</h1>
+          <p id="status" class="status">Checking…</p>
+        </div>
+      </header>
+
+      <label class="row">
+        <span>Auto-intercept downloads</span>
+        <input id="capture" type="checkbox" />
+      </label>
+
+      <label class="stack">
+        <span>Minimum size (MB, 0 = off)</span>
+        <input id="minMb" type="number" min="0" step="1" />
+      </label>
+
+      <p class="hint">
+        If Arus is offline, the browser keeps the download — nothing is dropped.
+      </p>
+
+      <div class="actions">
+        <button id="refresh" type="button">Refresh status</button>
+      </div>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Opsi Arus Companion</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Arus Companion</h1>
+      <p class="lead">
+        Pastikan aplikasi desktop Arus berjalan. Token biasanya terisi otomatis saat
+        terhubung — tidak perlu salin-tempel manual.
+      </p>
+
+      <label class="row">
+        <span>Aktifkan integrasi</span>
+        <input id="enabled" type="checkbox" />
+      </label>
+
+      <label class="row">
+        <span>Ambil unduhan browser otomatis</span>
+        <input id="capture" type="checkbox" />
+      </label>
+
+      <label class="stack">
+        <span>Port bridge</span>
+        <input id="port" type="number" min="1024" max="65535" />
+      </label>
+
+      <label class="stack">
+        <span>Token Arus (otomatis)</span>
+        <input
+          id="token"
+          type="password"
+          autocomplete="off"
+          placeholder="Akan terisi otomatis dari Arus"
+        />
+      </label>
+
+      <div class="actions">
+        <button id="pair" type="button">Hubungkan ke Arus</button>
+        <button id="save" type="button" class="ghost">Simpan</button>
+        <button id="test" type="button" class="ghost">Uji koneksi</button>
+      </div>
+
+      <p id="message" class="message" hidden></p>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

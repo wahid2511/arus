@@ -1,0 +1,11 @@
+node_modules
+out
+dist
+release
+extension/node_modules
+extension/dist
+extension/artifacts
+.idea
+*.log
+*.local
+.DS_Store

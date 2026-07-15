@@ -1,0 +1,96 @@
+:root {
+  color: #edeff2;
+  background: #12181f;
+  font: 13px/1.45 "Segoe UI", system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  min-width: 280px;
+  background: #12181f;
+}
+
+main {
+  padding: 14px 16px 16px;
+}
+
+header {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 16px;
+  letter-spacing: -0.02em;
+  color: #edeff2;
+}
+
+.status {
+  margin: 2px 0 0;
+  color: #8a94a3;
+  font-size: 12px;
+}
+
+.status.ok {
+  color: #2dd4bf;
+}
+
+.status.err {
+  color: #e2574c;
+}
+
+.row,
+.stack {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  color: #8a94a3;
+}
+
+.stack {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+input[type='number'] {
+  height: 34px;
+  border: 1px solid #2a323d;
+  border-radius: 8px;
+  padding: 0 10px;
+  color: #edeff2;
+  background: #1e2630;
+}
+
+input[type='checkbox'] {
+  accent-color: #f0a63f;
+}
+
+.hint {
+  margin: 0 0 12px;
+  color: #8a94a3;
+  font-size: 11px;
+}
+
+.actions {
+  display: flex;
+}
+
+button {
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  color: #412402;
+  background: #f0a63f;
+}
+
+button:hover {
+  filter: brightness(1.05);
+}
