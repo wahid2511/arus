@@ -27,49 +27,60 @@ function writeHostScript(dir: string): string {
 const net = require('net');
 const PIPE = ${JSON.stringify(PIPE_NAME)};
 
-function readExact(stream, size) {
+function readMessage(stream) {
   return new Promise((resolve, reject) => {
-    const chunks = [];
-    let received = 0;
-    const onData = (chunk) => {
-      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      chunks.push(buf);
-      received += buf.length;
-      if (received >= size) {
-        cleanup();
-        const all = Buffer.concat(chunks);
-        resolve(all.subarray(0, size));
-        const rest = all.subarray(size);
-        if (rest.length && typeof stream.unshift === 'function') stream.unshift(rest);
-      }
-    };
-    const onEnd = () => { cleanup(); reject(new Error('Unexpected end of stream')); };
-    const onError = (err) => { cleanup(); reject(err); };
+    let buffer = Buffer.alloc(0);
+    let messageLength = null;
+
     const cleanup = () => {
       stream.off('data', onData);
       stream.off('end', onEnd);
       stream.off('error', onError);
     };
+    const fail = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onData = (chunk) => {
+      const incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      buffer = Buffer.concat([buffer, incoming]);
+
+      if (messageLength === null && buffer.length >= 4) {
+        messageLength = buffer.readUInt32LE(0);
+        if (messageLength <= 0 || messageLength > 1024 * 1024) {
+          fail(new Error('Invalid message length'));
+          return;
+        }
+      }
+
+      if (messageLength === null || buffer.length < 4 + messageLength) return;
+
+      const body = buffer.subarray(4, 4 + messageLength);
+      cleanup();
+      try {
+        resolve(JSON.parse(body.toString('utf8')));
+      } catch (error) {
+        reject(error);
+      }
+    };
+    const onEnd = () => fail(new Error('Unexpected end of stream'));
+    const onError = (error) => fail(error);
+
     stream.on('data', onData);
     stream.on('end', onEnd);
     stream.on('error', onError);
   });
 }
 
-async function readMessage(stream) {
-  const header = await readExact(stream, 4);
-  const length = header.readUInt32LE(0);
-  if (length <= 0 || length > 1024 * 1024) throw new Error('Invalid message length');
-  const body = await readExact(stream, length);
-  return JSON.parse(body.toString('utf8'));
-}
-
 function writeMessage(stream, payload) {
   const body = Buffer.from(JSON.stringify(payload), 'utf8');
   const header = Buffer.alloc(4);
   header.writeUInt32LE(body.length, 0);
-  stream.write(header);
-  stream.write(body);
+  // Gabung jadi satu write, dan RETURN promise yang resolve
+  // setelah data benar-benar terkirim ke OS (callback dari write()).
+  return new Promise((resolve) => {
+    stream.write(Buffer.concat([header, body]), resolve);
+  });
 }
 
 function askBridge(request) {
@@ -104,20 +115,19 @@ function askBridge(request) {
 }
 
 (async () => {
+  let response;
   try {
     const request = await readMessage(process.stdin);
-    const response = await askBridge(request);
-    writeMessage(process.stdout, response);
+    response = await askBridge(request);
   } catch (error) {
-    writeMessage(process.stdout, {
+    response = {
       type: 'error',
       ok: false,
       error: error && error.message ? error.message : 'Native host failure'
-    });
-  } finally {
-    try { process.stdout.end(); } catch (_) {}
-    process.exit(0);
+    };
   }
+  await writeMessage(process.stdout, response); // tunggu sampai selesai
+  process.exit(0); // baru sekarang aman untuk exit
 })();
 `
   writeFileSync(scriptPath, source, 'utf8')
@@ -135,6 +145,7 @@ function writeLauncher(dir: string, hostScriptPath: string): string {
         '@echo off',
         'setlocal',
         'set ELECTRON_RUN_AS_NODE=1',
+        'set ELECTRON_NO_ATTACH_CONSOLE=1',
         `"${electronPath}" "${hostScriptPath}"`
       ].join('\r\n') + '\r\n',
       'utf8'
@@ -145,7 +156,7 @@ function writeLauncher(dir: string, hostScriptPath: string): string {
   const launcherPath = join(dir, 'arus-native-host.sh')
   writeFileSync(
     launcherPath,
-    `#!/bin/sh\nexport ELECTRON_RUN_AS_NODE=1\nexec "${electronPath}" "${hostScriptPath}"\n`,
+    `#!/bin/sh\nexport ELECTRON_RUN_AS_NODE=1\nexport ELECTRON_NO_ATTACH_CONSOLE=1\nexec "${electronPath}" "${hostScriptPath}"\n`,
     'utf8'
   )
   try {

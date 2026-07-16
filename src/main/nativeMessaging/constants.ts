@@ -3,8 +3,8 @@ export const CHROME_EXTENSION_ID = 'pnmkpgoolmmekpecphmakboegpajanmc'
 export const FIREFOX_EXTENSION_ID = 'arus@genghero.com'
 export const PIPE_NAME =
   process.platform === 'win32'
-    ? '\\\\.\\pipe\\com.genghero.arus.bridge'
-    : '/tmp/com.genghero.arus.bridge.sock'
+    ? '\\\\.\\pipe\\com.genghero.arus.bridge.v2'
+    : '/tmp/com.genghero.arus.bridge.v2.sock'
 
 export type BridgeRequest =
   | { type: 'ping' }
