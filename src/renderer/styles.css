@@ -886,6 +886,107 @@ input:focus {
   margin-top: 4px;
 }
 
+/* —— Browser capture confirmation —— */
+.capture-shell {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-window);
+  padding: 18px;
+  background: var(--color-panel);
+}
+
+.capture-titlebar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin: -18px -18px 12px;
+  padding: 14px 14px 10px 18px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg);
+  -webkit-app-region: drag;
+}
+
+.capture-titlebar h1 {
+  margin: 1px 0 0;
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.capture-eyebrow {
+  margin: 0;
+  color: var(--color-secondary);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.capture-close {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  place-items: center;
+  color: var(--color-text-secondary);
+  font-size: 20px;
+  line-height: 1;
+  -webkit-app-region: no-drag;
+}
+
+.capture-close:hover {
+  color: var(--color-text-primary);
+  background: var(--color-error-bg);
+}
+
+.capture-form {
+  display: grid;
+  gap: 10px;
+}
+
+.capture-form label {
+  display: grid;
+  gap: 5px;
+  color: var(--color-text-secondary);
+  font-size: 10px;
+}
+
+.capture-source {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px 10px;
+  min-width: 0;
+  padding: 9px 11px;
+  border-radius: 10px;
+  background: var(--color-bg);
+}
+
+.capture-source__name {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capture-source__meta {
+  color: var(--color-primary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.capture-source__url {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
 @media (max-width: 820px) {
   .speed-hero {
     grid-template-columns: 1fr;

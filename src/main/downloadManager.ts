@@ -22,7 +22,8 @@ const MAX_CONCURRENT_DOWNLOADS = 3
 const DEFAULT_SETTINGS: AppSettings = {
   connections: 8,
   revealOnComplete: true,
-  browserIntegrationEnabled: true
+  browserIntegrationEnabled: true,
+  launchAtLogin: true
 }
 
 export class DownloadManager {
@@ -59,6 +60,9 @@ export class DownloadManager {
     }
     if (typeof partial.browserIntegrationEnabled === 'boolean') {
       this.settings.browserIntegrationEnabled = partial.browserIntegrationEnabled
+    }
+    if (typeof partial.launchAtLogin === 'boolean') {
+      this.settings.launchAtLogin = partial.launchAtLogin
     }
     saveSettings(this.settingsPath, this.settings)
     return this.getSettings()
@@ -395,7 +399,11 @@ function loadSettings(path: string): AppSettings {
         typeof parsed.revealOnComplete === 'boolean'
           ? parsed.revealOnComplete
           : DEFAULT_SETTINGS.revealOnComplete,
-      browserIntegrationEnabled
+      browserIntegrationEnabled,
+      launchAtLogin:
+        typeof parsed.launchAtLogin === 'boolean'
+          ? parsed.launchAtLogin
+          : DEFAULT_SETTINGS.launchAtLogin
     }
     saveSettings(path, settings)
     return settings

@@ -44,7 +44,7 @@ Antarmuka menggunakan desain gelap datar (flat dark) dengan aksen amber dan teal
 
 | Fitur | Deskripsi |
 |-------|-----------|
-| **Intercept otomatis** | Unduhan browser yang memenuhi syarat dialihkan ke Arus |
+| **Intercept otomatis** | Unduhan browser yang memenuhi syarat dialihkan ke Arus dan dikonfirmasi lewat modal ringkas |
 | **Klik kanan** | *Download with Arus* pada tautan, media, atau halaman |
 | **Popup** | Status koneksi, toggle intercept, ambang ukuran minimum (MB) |
 | **Cookie & header** | Cookie, Referer, dan User-Agent dikirim ke Arus untuk unduhan terautentikasi |
@@ -66,13 +66,15 @@ flowchart LR
 
   subgraph ArusDesktop
     PIPE[Named pipe bridge]
+    PROMPT[Modal konfirmasi]
     DM[DownloadManager]
     SD[SegmentedDownloader]
   end
 
   EXT -->|Native Messaging<br/>stdio JSON| HOST
   HOST -->|JSON line| PIPE
-  PIPE --> DM
+  PIPE --> PROMPT
+  PROMPT -->|Mulai| DM
   DM --> SD
   SD -->|HTTP Range| SERVER[(Server)]
 ```
@@ -82,9 +84,10 @@ flowchart LR
 1. **Ekstensi** memanggil `browser.runtime.sendNativeMessage('com.genghero.arus', payload)`.
 2. **Browser** meluncurkan **native host** (`arus-native-host.cmd` / `.sh`) yang ditulis ke registry / folder NativeMessagingHosts.
 3. Host membaca **pesan JSON ber-prefix panjang 4 byte** dari stdin, meneruskan ke **named pipe** Arus:
-   - Windows: `\\.\pipe\com.genghero.arus.bridge`
-   - Linux/macOS: `/tmp/com.genghero.arus.bridge.sock`
-4. **Arus** (proses utama) mendengarkan pipe, menambahkan task ke `DownloadManager`, lalu `SegmentedDownloader` mengunduh file.
+   - Windows: `\\.\pipe\com.genghero.arus.bridge.v2`
+   - Linux/macOS: `/tmp/com.genghero.arus.bridge.v2.sock`
+4. **Arus** (proses utama di system tray) menyimpan permintaan sebagai pending dan langsung mengakuinya agar browser tidak timeout.
+5. Modal konfirmasi kecil meminta nama file dan folder. Tombol **Mulai download** baru menambahkan task ke `DownloadManager`; **Batal** membuang permintaan.
 
 Native host berjalan sebagai proses Node ringan (`ELECTRON_RUN_AS_NODE`) — **bukan** membuka jendela Electron baru.
 
@@ -170,9 +173,11 @@ npm run dev
 
 Saat `npm run dev` berjalan:
 
-1. Buka aplikasi Arus.
+1. Arus membuka dashboard dan tetap berjalan di system tray saat dashboard ditutup.
 2. Di **Pengaturan → Integrasi browser**, pastikan toggle aktif (native host terdaftar otomatis).
 3. Load ekstensi dari `extension/dist/chrome` (build dulu jika belum ada).
+
+Pada aplikasi yang sudah di-install, opsi **Jalankan Arus saat login Windows** memulai Arus dengan `--hidden`: dashboard tidak dibuka, tetapi tray dan native bridge langsung aktif. Mode dev tidak menulis startup entry Windows.
 
 ---
 
@@ -296,7 +301,7 @@ Unduhan browser diintercept jika:
   - Ukuran file ≥ ambang minimum (MB), atau
   - Tidak ada ambang (0 MB) dan file punya nama / MIME selain `text/html`
 
-Hanya setelah Arus **menerima** unduhan, browser membatalkan unduhan aslinya.
+Hanya setelah Arus **menerima dan menyimpan prompt pending**, browser membatalkan unduhan aslinya. Dashboard utama tidak dipaksa terbuka; Arus hanya menampilkan modal konfirmasi. Beberapa unduhan ditampilkan bergiliran.
 
 ---
 
@@ -309,6 +314,7 @@ Buka ikon ⚙ di aplikasi Arus.
 | **Koneksi paralel** | 8 | 4–16 koneksi HTTP per file |
 | **Tampilkan di folder saat selesai** | Aktif | Buka Explorer/Finder dan sorot file |
 | **Browser integration** | Aktif | Native host + pipe bridge |
+| **Jalankan saat login Windows** | Aktif (rilis) | Menjalankan Arus tersembunyi di tray; tidak diterapkan pada mode dev |
 | **Pasang ulang native host** | — | Perbaiki registrasi jika ekstensi tidak terhubung |
 | **Buka folder ekstensi** | — | Membuka `extension/dist/chrome` (dev) atau salinan di `resources` (rilis) |
 
@@ -356,7 +362,7 @@ Saat unduhan datang dari ekstensi, header `Cookie`, `Referer`, dan `User-Agent` 
 
 ### Ekstensi: "Arus is not running"
 
-Aplikasi desktop harus terbuka agar named pipe bridge aktif. Native host bisa diluncurkan browser, tetapi bridge hanya hidup saat proses Arus berjalan.
+Proses Arus harus berjalan di system tray agar named pipe bridge aktif. Dashboard boleh ditutup. Gunakan menu tray **Buka Arus** untuk menampilkan dashboard atau **Keluar** untuk benar-benar menghentikan Arus.
 
 ### Unduhan tidak diintercept
 

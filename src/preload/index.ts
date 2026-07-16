@@ -3,9 +3,11 @@ import type {
   AddDownloadInput,
   AppSettings,
   BrowserIntegrationStatus,
+  ConfirmPendingDownloadInput,
   DownloadProgressEvent,
   DownloadTask,
-  DownloadsApi
+  DownloadsApi,
+  PendingDownload
 } from '../shared/downloadTypes'
 
 const downloadsApi: DownloadsApi = {
@@ -31,6 +33,19 @@ const downloadsApi: DownloadsApi = {
     ipcRenderer.invoke('downloads:install-native-host') as Promise<BrowserIntegrationStatus>,
   openExtensionFolder: () =>
     ipcRenderer.invoke('downloads:open-extension-folder') as Promise<string | null>,
+  listPending: () =>
+    ipcRenderer.invoke('downloads:list-pending') as Promise<PendingDownload[]>,
+  confirmPending: (input: ConfirmPendingDownloadInput) =>
+    ipcRenderer.invoke('downloads:confirm-pending', input) as Promise<DownloadTask>,
+  rejectPending: (id: string) => ipcRenderer.invoke('downloads:reject-pending', id),
+  onPending: (callback: (pending: PendingDownload | null) => void) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      pending: PendingDownload | null
+    ): void => callback(pending)
+    ipcRenderer.on('downloads:pending', listener)
+    return () => ipcRenderer.removeListener('downloads:pending', listener)
+  },
   onUpdated: (callback: (task: DownloadTask) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, task: DownloadTask): void => callback(task)
     ipcRenderer.on('downloads:updated', listener)

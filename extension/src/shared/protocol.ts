@@ -12,6 +12,7 @@ export type NativeRequest =
   | {
       type: 'download'
       url: string
+      requestId?: string
       referrer?: string
       fileName?: string
       fileSize?: number | null
@@ -21,6 +22,7 @@ export type NativeRequest =
 
 export type NativeResponse =
   | { type: 'pong'; ok: true; version: string; app: 'Arus' }
+  | { type: 'download-pending'; ok: true; id: string }
   | { type: 'download-result'; ok: true; id: string }
   | { type: 'error'; ok: false; error: string }
 

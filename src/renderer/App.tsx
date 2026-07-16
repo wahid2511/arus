@@ -26,7 +26,8 @@ export default function App(): ReactElement {
   const [settings, setSettings] = useState<AppSettings>({
     connections: 8,
     revealOnComplete: true,
-    browserIntegrationEnabled: true
+    browserIntegrationEnabled: true,
+    launchAtLogin: true
   })
   const [browserStatus, setBrowserStatus] = useState<BrowserIntegrationStatus | null>(null)
   const [url, setUrl] = useState('')
@@ -507,6 +508,23 @@ export default function App(): ReactElement {
               </label>
               <span className="settings-hint">
                 Otomatis buka Explorer/Finder dan sorot file setelah unduhan selesai.
+              </span>
+
+              <label className="settings-toggle">
+                <span>Jalankan Arus saat login Windows</span>
+                <input
+                  type="checkbox"
+                  checked={settings.launchAtLogin}
+                  disabled={browserStatus ? !browserStatus.loginItemSupported : true}
+                  onChange={(event) =>
+                    void saveSettingsPartial({ launchAtLogin: event.target.checked })
+                  }
+                />
+              </label>
+              <span className="settings-hint">
+                {browserStatus?.loginItemSupported
+                  ? 'Arus dimulai tersembunyi di system tray agar ekstensi selalu siap.'
+                  : 'Tersedia pada aplikasi Arus yang sudah di-install; mode dev tidak mengubah startup Windows.'}
               </span>
 
               <div className="settings-section">

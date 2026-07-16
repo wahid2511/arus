@@ -40,6 +40,24 @@ export interface AddDownloadInput {
   headers?: Record<string, string>
 }
 
+export interface PendingDownload {
+  id: string
+  requestId?: string
+  url: string
+  directory: string
+  referrer?: string
+  fileName: string
+  fileSize?: number | null
+  headers?: Record<string, string>
+  createdAt: number
+}
+
+export interface ConfirmPendingDownloadInput {
+  id: string
+  directory?: string
+  fileName?: string
+}
+
 export interface DownloadProgressEvent {
   id: string
   downloadedBytes: number
@@ -56,6 +74,8 @@ export interface AppSettings {
   revealOnComplete: boolean
   /** Accept downloads from browser extensions via native messaging. */
   browserIntegrationEnabled: boolean
+  /** Start the installed app hidden in the system tray when Windows signs in. */
+  launchAtLogin: boolean
 }
 
 export interface BrowserIntegrationStatus {
@@ -66,6 +86,7 @@ export interface BrowserIntegrationStatus {
   chromeExtensionId: string
   firefoxExtensionId: string
   extensionPath: string | null
+  loginItemSupported: boolean
   lastError?: string
 }
 
@@ -88,6 +109,10 @@ export interface DownloadsApi {
   getBrowserIntegrationStatus(): Promise<BrowserIntegrationStatus>
   installNativeHost(): Promise<BrowserIntegrationStatus>
   openExtensionFolder(): Promise<string | null>
+  listPending(): Promise<PendingDownload[]>
+  confirmPending(input: ConfirmPendingDownloadInput): Promise<DownloadTask>
+  rejectPending(id: string): Promise<void>
+  onPending(callback: (pending: PendingDownload | null) => void): () => void
   onUpdated(callback: (task: DownloadTask) => void): () => void
   onSnapshot(callback: (tasks: DownloadTask[]) => void): () => void
   onProgress(callback: (progress: DownloadProgressEvent) => void): () => void

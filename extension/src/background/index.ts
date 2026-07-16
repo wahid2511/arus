@@ -98,6 +98,7 @@ async function notify(title: string, message: string, isError = false): Promise<
 
 async function sendDownloadToArus(input: {
   url: string
+  requestId?: string
   referrer?: string
   fileName?: string
   fileSize?: number | null
@@ -113,6 +114,7 @@ async function sendDownloadToArus(input: {
   const response = await sendNative({
     type: 'download',
     url: input.url,
+    requestId: input.requestId,
     referrer: input.referrer,
     fileName: input.fileName,
     fileSize: input.fileSize ?? null,
@@ -129,6 +131,7 @@ async function handoffToArus(item: browser.Downloads.DownloadItem): Promise<bool
   try {
     await sendDownloadToArus({
       url: item.finalUrl || item.url,
+      requestId: String(item.id),
       referrer: item.referrer || undefined,
       fileName: fileNameOnly(item.filename),
       fileSize: item.fileSize > 0 ? item.fileSize : null

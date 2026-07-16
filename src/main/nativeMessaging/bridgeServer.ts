@@ -5,8 +5,10 @@ import { PIPE_NAME, type BridgeRequest, type BridgeResponse } from './constants'
 
 type BridgeHandlers = {
   isEnabled: () => boolean
-  addDownload: (input: AddDownloadInput) => { id: string }
-  onDownloadAdded?: (id: string) => void
+  proposeDownload: (
+    input: AddDownloadInput & { requestId?: string; fileSize?: number | null }
+  ) => { id: string }
+  onDownloadProposed?: (id: string) => void
   getVersion?: () => string
 }
 
@@ -133,14 +135,16 @@ export class NativeBridgeServer {
       }
 
       try {
-        const task = this.handlers.addDownload({
+        const pending = this.handlers.proposeDownload({
           url,
+          requestId: request.requestId,
           referrer: request.referrer,
           fileName: request.fileName,
+          fileSize: request.fileSize,
           headers
         })
-        this.handlers.onDownloadAdded?.(task.id)
-        return { type: 'download-result', ok: true, id: task.id }
+        this.handlers.onDownloadProposed?.(pending.id)
+        return { type: 'download-pending', ok: true, id: pending.id }
       } catch (error) {
         return {
           type: 'error',
