@@ -1,7 +1,7 @@
 /** Shared native-messaging contract (keep extension/src/shared/protocol.ts in sync). */
-export const NATIVE_HOST_NAME = 'com.genghero.arus'
+export const NATIVE_HOST_NAME = 'com.arus.app'
 export const CHROME_EXTENSION_ID = 'pnmkpgoolmmekpecphmakboegpajanmc'
-export const FIREFOX_EXTENSION_ID = 'arus@genghero.com'
+export const FIREFOX_EXTENSION_ID = 'arus@arus.app'
 
 export type BridgeRequest =
   | { type: 'ping' }

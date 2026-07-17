@@ -5,7 +5,7 @@
   "description": "Hand off downloads to the Arus desktop download manager.",
   "browser_specific_settings": {
     "gecko": {
-      "id": "arus@genghero.com",
+      "id": "arus@arus.app",
       "strict_min_version": "128.0"
     }
   },

@@ -90,6 +90,51 @@ export interface BrowserIntegrationStatus {
   lastError?: string
 }
 
+export type SpeedTestPhase = 'idle' | 'latency' | 'download' | 'upload' | 'complete' | 'error' | 'cancelled'
+
+export interface NetworkEndpointInfo {
+  localIp: string | null
+  publicIp: string | null
+  interfaceName?: string | null
+  colo?: string | null
+  location?: string | null
+}
+
+export interface SpeedTestProgress {
+  phase: SpeedTestPhase
+  progress: number
+  message: string
+  latencyMs?: number
+  downloadMbps?: number
+  uploadMbps?: number
+  currentMbps?: number
+  server?: string
+  localIp?: string | null
+  publicIp?: string | null
+  interfaceName?: string | null
+  colo?: string | null
+  error?: string
+}
+
+export interface SpeedTestResult {
+  latencyMs: number
+  downloadMbps: number
+  uploadMbps: number
+  server: string
+  localIp: string | null
+  publicIp: string | null
+  interfaceName: string | null
+  colo: string | null
+  finishedAt: number
+}
+
+export interface SpeedTestApi {
+  start(): Promise<SpeedTestResult>
+  cancel(): Promise<void>
+  getNetworkInfo(): Promise<NetworkEndpointInfo>
+  onProgress(callback: (progress: SpeedTestProgress) => void): () => void
+}
+
 export interface DownloadsApi {
   add(input: AddDownloadInput): Promise<DownloadTask>
   list(): Promise<DownloadTask[]>

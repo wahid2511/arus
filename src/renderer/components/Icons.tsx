@@ -52,6 +52,18 @@ export function IconArrowDownCircle({ size }: IconProps): ReactElement {
   )
 }
 
+export function IconGauge({ size }: IconProps): ReactElement {
+  return (
+    <Icon size={size}>
+      <path d="M4 14a8 8 0 1 1 16 0" />
+      <path d="M12 14l4-5" />
+      <path d="M7 14h.01" />
+      <path d="M17 14h.01" />
+      <path d="M12 18h.01" />
+    </Icon>
+  )
+}
+
 export function IconCheck({ size }: IconProps): ReactElement {
   return (
     <Icon size={size}>

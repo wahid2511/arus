@@ -9,12 +9,17 @@ import { appState } from '../app/state'
 import { revealPathInFolder } from '../downloads/pathReveal'
 import { getBrowserIntegrationStatus, registerHost } from './browserIntegration'
 import { installNativeMessagingHost, resolveExtensionDistPath } from '../nativeMessaging/register'
+import { SpeedTestService } from '../speedTest/speedTestService'
 import { applyLoginItemSetting } from '../system/loginItem'
 import { refreshTrayMenu } from '../tray/trayController'
 import {
   assertCaptureSender,
   showNextPending
 } from '../windows/captureWindow'
+
+const speedTest = new SpeedTestService((progress) => {
+  appState.mainWindow?.webContents.send(IPC_EVENTS.speedTestProgress, progress)
+})
 
 export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.downloads.add, (_event, input: AddDownloadInput) =>
@@ -129,6 +134,10 @@ export function registerIpcHandlers(): void {
     }
     showNextPending()
   })
+
+  ipcMain.handle(IPC.speedTest.start, () => speedTest.start())
+  ipcMain.handle(IPC.speedTest.cancel, () => speedTest.cancel())
+  ipcMain.handle(IPC.speedTest.networkInfo, () => speedTest.getNetworkInfo())
 
   ipcMain.on(IPC.window.minimize, (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize()

@@ -2,46 +2,39 @@ import { useState } from 'react'
 import type { ComponentType, ReactElement } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
-  IconAlertTriangle,
   IconArrowDownCircle,
-  IconCheck,
-  IconLayoutGrid,
-  IconPlayerPause,
-  IconTrash
+  IconGauge,
+  IconSettings
 } from './Icons'
 
-export type SidebarFilter = 'all' | 'downloading' | 'completed' | 'paused' | 'failed' | 'trash'
+export type AppPage = 'downloads' | 'speedtest' | 'settings'
 
 export interface SidebarItem {
-  id: SidebarFilter
+  id: AppPage
   label: string
   icon: ComponentType<{ size?: number }>
 }
 
 export const SIDEBAR_ITEMS: SidebarItem[] = [
-  { id: 'all', label: 'Semua', icon: IconLayoutGrid },
-  { id: 'downloading', label: 'Mengunduh', icon: IconArrowDownCircle },
-  { id: 'completed', label: 'Selesai', icon: IconCheck },
-  { id: 'paused', label: 'Dijeda', icon: IconPlayerPause },
-  { id: 'failed', label: 'Gagal', icon: IconAlertTriangle },
-  { id: 'trash', label: 'Sampah', icon: IconTrash }
+  { id: 'downloads', label: 'Unduhan', icon: IconArrowDownCircle },
+  { id: 'speedtest', label: 'Speed Test', icon: IconGauge },
+  { id: 'settings', label: 'Pengaturan', icon: IconSettings }
 ]
 
 export interface SidebarProps {
-  active: SidebarFilter
-  onSelect: (id: SidebarFilter) => void
-  counts?: Partial<Record<SidebarFilter, number>>
+  active: AppPage
+  onSelect: (id: AppPage) => void
 }
 
 const spring = { type: 'spring' as const, stiffness: 420, damping: 32, mass: 0.7 }
 
-export default function Sidebar({ active, onSelect, counts }: SidebarProps): ReactElement {
+export default function Sidebar({ active, onSelect }: SidebarProps): ReactElement {
   const [hovered, setHovered] = useState(false)
 
   return (
     <motion.nav
       className={`nav-rail${hovered ? ' nav-rail--open' : ''}`}
-      aria-label="Filter unduhan"
+      aria-label="Navigasi aplikasi"
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       animate={{ width: hovered ? 168 : 64 }}
@@ -51,7 +44,6 @@ export default function Sidebar({ active, onSelect, counts }: SidebarProps): Rea
         {SIDEBAR_ITEMS.map((item) => {
           const Icon = item.icon
           const isActive = item.id === active
-          const count = counts?.[item.id]
 
           return (
             <motion.button
@@ -88,11 +80,6 @@ export default function Sidebar({ active, onSelect, counts }: SidebarProps): Rea
                   </motion.span>
                 ) : null}
               </AnimatePresence>
-              {typeof count === 'number' && count > 0 ? (
-                <span className={`nav-rail__count mono${hovered ? '' : ' nav-rail__count--dot'}`}>
-                  {hovered ? count : ''}
-                </span>
-              ) : null}
             </motion.button>
           )
         })}

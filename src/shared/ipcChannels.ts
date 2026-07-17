@@ -23,6 +23,11 @@ export const IPC = {
     confirmPending: 'downloads:confirm-pending',
     rejectPending: 'downloads:reject-pending'
   },
+  speedTest: {
+    start: 'speedtest:start',
+    cancel: 'speedtest:cancel',
+    networkInfo: 'speedtest:network-info'
+  },
   window: {
     minimize: 'window:minimize',
     maximize: 'window:maximize',
@@ -35,5 +40,6 @@ export const IPC_EVENTS = {
   downloadsUpdated: 'downloads:updated',
   downloadsSnapshot: 'downloads:snapshot',
   downloadsPending: 'downloads:pending',
-  downloadProgress: 'download:progress'
+  downloadProgress: 'download:progress',
+  speedTestProgress: 'speedtest:progress'
 } as const

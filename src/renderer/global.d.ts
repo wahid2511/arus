@@ -1,4 +1,4 @@
-import type { DownloadsApi } from '../shared/downloadTypes'
+import type { DownloadsApi, SpeedTestApi } from '../shared/downloadTypes'
 
 interface WindowControlsApi {
   minimize(): void
@@ -9,6 +9,7 @@ interface WindowControlsApi {
 declare global {
   interface Window {
     downloads: DownloadsApi
+    speedTest: SpeedTestApi
     windowControls?: WindowControlsApi
   }
 }

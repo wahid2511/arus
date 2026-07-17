@@ -27,7 +27,7 @@ export function createCaptureWindow(): void {
     frame: false,
     icon: icon && !icon.isEmpty() ? icon : undefined,
     webPreferences: {
-      preload: join(__dirname, '../../preload/index.js'),
+      preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false
@@ -39,7 +39,7 @@ export function createCaptureWindow(): void {
     rendererUrl.searchParams.set('view', 'capture')
     void appState.captureWindow.loadURL(rendererUrl.toString())
   } else {
-    void appState.captureWindow.loadFile(join(__dirname, '../../renderer/index.html'), {
+    void appState.captureWindow.loadFile(join(__dirname, '../renderer/index.html'), {
       query: { view: 'capture' }
     })
   }

@@ -1,9 +1,9 @@
 {
-  "name": "download-nexus",
+  "name": "arus",
   "version": "0.1.0",
   "description": "Arus — desktop download manager.",
   "main": "./out/main/index.js",
-  "author": "GENGHERO",
+  "author": "Arus",
   "license": "MIT",
   "scripts": {
     "dev": "electron-vite dev",
@@ -35,7 +35,7 @@
     "vite": "^7.3.6"
   },
   "build": {
-    "appId": "com.genghero.arus",
+    "appId": "com.arus.app",
     "productName": "Arus",
     "icon": "build/icon.png",
     "files": [

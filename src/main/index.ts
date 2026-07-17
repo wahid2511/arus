@@ -5,7 +5,7 @@ import { registerLifecycleHandlers } from './app/lifecycle'
 app.commandLine.appendSwitch('disable-gpu-shader-disk-cache')
 
 if (process.platform === 'win32') {
-  app.setAppUserModelId('com.genghero.arus')
+  app.setAppUserModelId('com.arus.app')
 }
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock()

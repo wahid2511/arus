@@ -81,11 +81,11 @@ flowchart LR
 
 ### Alur komunikasi
 
-1. **Ekstensi** memanggil `browser.runtime.sendNativeMessage('com.genghero.arus', payload)`.
+1. **Ekstensi** memanggil `browser.runtime.sendNativeMessage('com.arus.app', payload)`.
 2. **Browser** meluncurkan **native host** (`arus-native-host.cmd` / `.sh`) yang ditulis ke registry / folder NativeMessagingHosts.
 3. Host membaca **pesan JSON ber-prefix panjang 4 byte** dari stdin, meneruskan ke **named pipe** Arus:
-   - Windows: `\\.\pipe\com.genghero.arus.bridge.v2`
-   - Linux/macOS: `/tmp/com.genghero.arus.bridge.v2.sock`
+   - Windows: `\\.\pipe\com.arus.app.bridge.v2`
+   - Linux/macOS: `/tmp/com.arus.app.bridge.v2.sock`
 4. **Arus** (proses utama di system tray) menyimpan permintaan sebagai pending dan langsung mengakuinya agar browser tidak timeout.
 5. Modal konfirmasi kecil meminta nama file dan folder. Tombol **Mulai download** baru menambahkan task ke `DownloadManager`; **Batal** membuang permintaan.
 
@@ -96,8 +96,8 @@ Native host berjalan sebagai proses Node ringan (`ELECTRON_RUN_AS_NODE`) — **b
 | Browser | ID |
 |---------|-----|
 | Chrome / Edge / Brave (unpacked) | `pnmkpgoolmmekpecphmakboegpajanmc` |
-| Firefox | `arus@genghero.com` |
-| Native host name | `com.genghero.arus` |
+| Firefox | `arus@arus.app` |
+| Native host name | `com.arus.app` |
 
 ---
 
@@ -118,7 +118,7 @@ Native host berjalan sebagai proses Node ringan (`ELECTRON_RUN_AS_NODE`) — **b
 ## Struktur proyek
 
 ```
-genghero-download-manager/
+arus/
 ├── src/
 │   ├── main/                 # Proses utama Electron
 │   │   ├── main.ts           # Window, IPC, lifecycle
@@ -167,7 +167,7 @@ genghero-download-manager/
 ```bash
 # Clone repositori
 git clone <url-repo>
-cd genghero-download-manager
+cd arus-download-manager
 
 # Dependensi aplikasi desktop
 npm install
@@ -283,11 +283,11 @@ Klik ikon ekstensi Arus di toolbar browser. Popup harus menampilkan **Connected 
 
 | Platform | Lokasi registrasi |
 |----------|-------------------|
-| Windows (Chrome) | `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.genghero.arus` |
+| Windows (Chrome) | `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.arus.app` |
 | Windows (Edge) | `HKCU\Software\Microsoft\Edge\NativeMessagingHosts\...` |
 | Windows (Brave) | `HKCU\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\...` |
 | Windows (Firefox) | `HKCU\Software\Mozilla\NativeMessagingHosts\...` |
-| macOS (Chrome) | `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.genghero.arus.json` |
+| macOS (Chrome) | `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.arus.app.json` |
 | macOS (Edge) | `~/Library/Application Support/Microsoft Edge/NativeMessagingHosts/...` |
 | macOS (Brave) | `~/Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts/...` |
 | macOS (Firefox) | `~/Library/Application Support/Mozilla/NativeMessagingHosts/...` |
@@ -474,7 +474,7 @@ Token warna (flat dark, tanpa gradien/shadow):
 
 ## Lisensi
 
-MIT — lihat `package.json` (author: GENGHERO).
+MIT — lihat `package.json` (author: Arus).
 
 ---
 

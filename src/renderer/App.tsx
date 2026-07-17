@@ -7,9 +7,13 @@ import Gauge from './components/Gauge'
 import ActionToolbar from './components/ActionToolbar'
 import { IconPlus, IconSettings } from './components/Icons'
 import Sidebar from './components/Sidebar'
-import type { SidebarFilter } from './components/Sidebar'
+import type { AppPage } from './components/Sidebar'
 import TitleBar from './components/TitleBar'
 import { countTasksByFilter, filterTasks, toDownloadRow } from './features/downloadList/taskHelpers'
+import type { DownloadFilter } from './features/downloadList/taskHelpers'
+import { FilterChips } from './features/downloadList/FilterChips'
+import { SettingsView } from './features/settings/SettingsView'
+import { SpeedTestView } from './features/speedTest/SpeedTestView'
 import { StatOrb } from './features/speedHero/StatOrb'
 import { useDownloads } from './hooks/useDownloads'
 import { spring } from './motion'
@@ -19,12 +23,12 @@ const GAUGE_MAX_BYTES_PER_SEC = 100 * 1024 * 1024
 
 export default function App(): ReactElement {
   const { tasks, refreshTasks, upsertLocalTask } = useDownloads()
-  const [filter, setFilter] = useState<SidebarFilter>('all')
+  const [page, setPage] = useState<AppPage>('downloads')
+  const [filter, setFilter] = useState<DownloadFilter>('all')
   const [peakSpeed, setPeakSpeed] = useState(0)
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [dialogOpen, setDialogOpen] = useState(false)
-  const [settingsOpen, setSettingsOpen] = useState(false)
   const [settings, setSettings] = useState<AppSettings>({
     connections: 8,
     revealOnComplete: true,
@@ -188,9 +192,11 @@ export default function App(): ReactElement {
       />
 
       <div className="app-body">
-        <Sidebar active={filter} onSelect={setFilter} counts={filterCounts} />
+        <Sidebar active={page} onSelect={setPage} />
 
         <main className="main-pane">
+          {page === 'downloads' ? (
+            <>
           <section className="speed-hero" aria-label="Kecepatan unduh">
             <div className="speed-hero__copy">
               <motion.p
@@ -207,7 +213,7 @@ export default function App(): ReactElement {
                   className="btn-ghost btn-icon"
                   aria-label="Pengaturan"
                   title={`Koneksi paralel: ${settings.connections}`}
-                  onClick={() => setSettingsOpen(true)}
+                  onClick={() => setPage('settings')}
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.94 }}
                 >
@@ -293,6 +299,8 @@ export default function App(): ReactElement {
             }}
           />
 
+          <FilterChips active={filter} counts={filterCounts} onSelect={setFilter} />
+
           <div className="download-list" aria-label="Daftar unduhan">
             <AnimatePresence mode="popLayout">
               {rows.length === 0 ? (
@@ -333,6 +341,21 @@ export default function App(): ReactElement {
               )}
             </AnimatePresence>
           </div>
+            </>
+          ) : null}
+
+          {page === 'speedtest' ? <SpeedTestView /> : null}
+
+          {page === 'settings' ? (
+            <SettingsView
+              settings={settings}
+              browserStatus={browserStatus}
+              onSaveConnections={saveConnections}
+              onSaveSettings={saveSettingsPartial}
+              onReinstallNativeHost={reinstallNativeHost}
+              onOpenExtensionFolder={openExtensionFolder}
+            />
+          ) : null}
         </main>
       </div>
 
@@ -397,142 +420,6 @@ export default function App(): ReactElement {
         ) : null}
       </AnimatePresence>
 
-      <AnimatePresence>
-        {settingsOpen ? (
-          <motion.div
-            className="dialog-backdrop"
-            role="presentation"
-            onClick={() => setSettingsOpen(false)}
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-          >
-            <motion.div
-              className="dialog dialog--wide"
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby="settings-title"
-              onClick={(event) => event.stopPropagation()}
-              initial={{ opacity: 0, y: 16, scale: 0.96 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 10, scale: 0.97 }}
-              transition={spring}
-            >
-              <h2 id="settings-title">Pengaturan</h2>
-              <label>
-                Koneksi paralel per unduhan
-                <div className="settings-range">
-                  <input
-                    type="range"
-                    min={4}
-                    max={16}
-                    step={1}
-                    value={settings.connections}
-                    onChange={(event) => void saveConnections(Number(event.target.value))}
-                  />
-                  <span className="settings-range__value mono">{settings.connections}</span>
-                </div>
-                <span className="settings-hint">
-                  Default 8. Turunkan jika server membatasi banyak koneksi dari satu IP.
-                </span>
-              </label>
-
-              <label className="settings-toggle">
-                <span>Tampilkan di folder saat selesai</span>
-                <input
-                  type="checkbox"
-                  checked={settings.revealOnComplete}
-                  onChange={(event) =>
-                    void saveSettingsPartial({ revealOnComplete: event.target.checked })
-                  }
-                />
-              </label>
-              <span className="settings-hint">
-                Otomatis buka Explorer/Finder dan sorot file setelah unduhan selesai.
-              </span>
-
-              <label className="settings-toggle">
-                <span>Jalankan Arus saat login</span>
-                <input
-                  type="checkbox"
-                  checked={settings.launchAtLogin}
-                  disabled={browserStatus ? !browserStatus.loginItemSupported : true}
-                  onChange={(event) =>
-                    void saveSettingsPartial({ launchAtLogin: event.target.checked })
-                  }
-                />
-              </label>
-              <span className="settings-hint">
-                {browserStatus?.loginItemSupported
-                  ? 'Arus dimulai tersembunyi di menu bar / system tray agar ekstensi selalu siap.'
-                  : 'Tersedia pada aplikasi Arus yang sudah di-install; mode dev tidak mengubah startup sistem.'}
-              </span>
-
-              <div className="settings-section">
-                <h3>Integrasi browser</h3>
-                <label className="settings-toggle">
-                  <span>Browser integration (Native Messaging)</span>
-                  <input
-                    type="checkbox"
-                    checked={settings.browserIntegrationEnabled}
-                    onChange={(event) =>
-                      void saveSettingsPartial({
-                        browserIntegrationEnabled: event.target.checked
-                      })
-                    }
-                  />
-                </label>
-                <p className="settings-hint">
-                  Status:{' '}
-                  {browserStatus?.bridgeListening
-                    ? 'bridge aktif'
-                    : settings.browserIntegrationEnabled
-                      ? 'bridge tidak mendengar'
-                      : 'dimatikan'}
-                  {' · '}
-                  host {browserStatus?.hostInstalled ? 'terpasang' : 'belum terpasang'}
-                  {browserStatus?.lastError ? ` · ${browserStatus.lastError}` : ''}
-                  .
-                </p>
-                <p className="settings-hint mono">
-                  Chrome ID: {browserStatus?.chromeExtensionId || '—'}
-                  <br />
-                  Firefox ID: {browserStatus?.firefoxExtensionId || '—'}
-                  <br />
-                  Host: {browserStatus?.hostName || 'com.genghero.arus'}
-                </p>
-                <div className="folder-row">
-                  <button
-                    type="button"
-                    className="btn-ghost"
-                    onClick={() => void reinstallNativeHost()}
-                  >
-                    Pasang ulang native host
-                  </button>
-                  <button
-                    type="button"
-                    className="btn-ghost"
-                    onClick={() => void openExtensionFolder()}
-                  >
-                    Buka folder ekstensi
-                  </button>
-                </div>
-                <p className="settings-hint">
-                  Chrome/Edge: Load unpacked <span className="mono">extension/dist/chrome</span>.
-                  Firefox: load <span className="mono">extension/dist/firefox</span>. Pastikan Arus
-                  berjalan sebelum menguji unduhan.
-                </p>
-              </div>
-
-              <div className="dialog__actions">
-                <button type="button" className="btn-primary" onClick={() => setSettingsOpen(false)}>
-                  Selesai
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        ) : null}
-      </AnimatePresence>
     </div>
   )
 }

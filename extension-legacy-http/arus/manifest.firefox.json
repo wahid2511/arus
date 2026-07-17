@@ -5,7 +5,7 @@
   "description": "Kirim unduhan dari browser ke aplikasi desktop Arus.",
   "browser_specific_settings": {
     "gecko": {
-      "id": "arus-companion@genghero.local",
+      "id": "arus-companion@arus.local",
       "strict_min_version": "121.0"
     }
   },

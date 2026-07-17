@@ -25,7 +25,7 @@ export function createMainWindow(): void {
     roundedCorners: true,
     icon: icon && !icon.isEmpty() ? icon : undefined,
     webPreferences: {
-      preload: join(__dirname, '../../preload/index.js'),
+      preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false
@@ -35,7 +35,7 @@ export function createMainWindow(): void {
   if (process.env.ELECTRON_RENDERER_URL) {
     void appState.mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
-    void appState.mainWindow.loadFile(join(__dirname, '../../renderer/index.html'))
+    void appState.mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
 
   appState.mainWindow.once('ready-to-show', () => {

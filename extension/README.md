@@ -27,7 +27,7 @@ npm run package:extension
 
 ## Install
 
-1. Start **Arus** (registers the native host `com.genghero.arus` automatically when
+1. Start **Arus** (registers the native host `com.arus.app` automatically when
    Browser integration is enabled).
 2. Chrome / Edge / Brave → `chrome://extensions` → Developer mode → **Load unpacked**
    → select `extension/dist/chrome`.
@@ -35,7 +35,7 @@ npm run package:extension
    → select `extension/dist/firefox/manifest.json`.
 
 Stable Chrome unpacked ID (from manifest `key`): `pnmkpgoolmmekpecphmakboegpajanmc`  
-Firefox ID: `arus@genghero.com`
+Firefox ID: `arus@arus.app`
 
 ## Behavior
 

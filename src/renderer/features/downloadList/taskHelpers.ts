@@ -1,7 +1,8 @@
 import type { DownloadTask } from '../../../shared/downloadTypes'
 import type { DownloadRowData } from '../../components/DownloadRow'
-import type { SidebarFilter } from '../../components/Sidebar'
 import { formatBytes, formatEta, formatSpeed } from '../../utils/format'
+
+export type DownloadFilter = 'all' | 'downloading' | 'completed' | 'paused' | 'failed' | 'trash'
 
 export function taskSortWeight(task: DownloadTask): number {
   switch (task.status) {
@@ -28,7 +29,7 @@ export function upsertTask(tasks: DownloadTask[], updated: DownloadTask): Downlo
   return next.sort((a, b) => b.createdAt - a.createdAt)
 }
 
-export function filterTasks(tasks: DownloadTask[], filter: SidebarFilter): DownloadTask[] {
+export function filterTasks(tasks: DownloadTask[], filter: DownloadFilter): DownloadTask[] {
   const sorted = [...tasks].sort(
     (a, b) => taskSortWeight(b) - taskSortWeight(a) || b.createdAt - a.createdAt
   )
@@ -96,7 +97,7 @@ function buildMeta(task: DownloadTask): string {
   return `${received} / ${total} · ${formatSpeed(task.speedBytesPerSecond)} · ${eta}`
 }
 
-export function countTasksByFilter(tasks: DownloadTask[]): Record<SidebarFilter, number> {
+export function countTasksByFilter(tasks: DownloadTask[]): Record<DownloadFilter, number> {
   return {
     all: tasks.filter((task) => task.status !== 'cancelled').length,
     downloading: tasks.filter((task) => task.status === 'downloading' || task.status === 'queued')

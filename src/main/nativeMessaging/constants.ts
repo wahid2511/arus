@@ -8,5 +8,5 @@ export {
 
 export const PIPE_NAME =
   process.platform === 'win32'
-    ? '\\\\.\\pipe\\com.genghero.arus.bridge.v2'
-    : '/tmp/com.genghero.arus.bridge.v2.sock'
+    ? '\\\\.\\pipe\\com.arus.app.bridge.v2'
+    : '/tmp/com.arus.app.bridge.v2.sock'

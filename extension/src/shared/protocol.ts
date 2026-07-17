@@ -1,12 +1,12 @@
 /** Keep in sync with src/shared/nativeProtocol.ts */
 /** Shared constant: must match Electron native host registration. */
-export const NATIVE_HOST_NAME = 'com.genghero.arus'
+export const NATIVE_HOST_NAME = 'com.arus.app'
 
 /** Stable unpacked Chrome extension ID (from embedded manifest key). */
 export const CHROME_EXTENSION_ID = 'pnmkpgoolmmekpecphmakboegpajanmc'
 
 /** Firefox add-on ID (gecko). */
-export const FIREFOX_EXTENSION_ID = 'arus@genghero.com'
+export const FIREFOX_EXTENSION_ID = 'arus@arus.app'
 
 export type NativeRequest =
   | { type: 'ping' }

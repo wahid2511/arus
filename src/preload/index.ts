@@ -8,7 +8,10 @@ import type {
   DownloadProgressEvent,
   DownloadTask,
   DownloadsApi,
-  PendingDownload
+  NetworkEndpointInfo,
+  PendingDownload,
+  SpeedTestApi,
+  SpeedTestProgress
 } from '../shared/downloadTypes'
 
 const downloadsApi: DownloadsApi = {
@@ -71,5 +74,19 @@ const windowControlsApi = {
   close: () => ipcRenderer.send(IPC.window.close)
 }
 
+const speedTestApi: SpeedTestApi = {
+  start: () => ipcRenderer.invoke(IPC.speedTest.start),
+  cancel: () => ipcRenderer.invoke(IPC.speedTest.cancel),
+  getNetworkInfo: () =>
+    ipcRenderer.invoke(IPC.speedTest.networkInfo) as Promise<NetworkEndpointInfo>,
+  onProgress: (callback: (progress: SpeedTestProgress) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, progress: SpeedTestProgress): void =>
+      callback(progress)
+    ipcRenderer.on(IPC_EVENTS.speedTestProgress, listener)
+    return () => ipcRenderer.removeListener(IPC_EVENTS.speedTestProgress, listener)
+  }
+}
+
 contextBridge.exposeInMainWorld('downloads', downloadsApi)
+contextBridge.exposeInMainWorld('speedTest', speedTestApi)
 contextBridge.exposeInMainWorld('windowControls', windowControlsApi)
