@@ -28,7 +28,7 @@
     "@types/react": "latest",
     "@types/react-dom": "latest",
     "@vitejs/plugin-react": "^5.0.4",
-    "electron": "37.2.6",
+    "electron": "^43.1.1",
     "electron-builder": "latest",
     "electron-vite": "^5.0.0",
     "typescript": "latest",
@@ -64,10 +64,18 @@
       "target": [
         "nsis"
       ]
+    },
+    "mac": {
+      "icon": "build/icon.png",
+      "category": "public.app-category.utilities",
+      "target": [
+        "dmg",
+        "zip"
+      ]
     }
   },
   "allowScripts": {
-    "electron@37.2.6": true,
+    "electron@43.1.1": true,
     "electron-winstaller@5.4.0": true,
     "esbuild@0.25.12": true,
     "esbuild@0.28.1": true

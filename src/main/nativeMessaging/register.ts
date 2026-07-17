@@ -131,6 +131,13 @@ function askBridge(request) {
 })();
 `
   writeFileSync(scriptPath, source, 'utf8')
+  if (process.platform !== 'win32') {
+    try {
+      chmodSync(scriptPath, 0o644)
+    } catch {
+      // ignore
+    }
+  }
   return scriptPath
 }
 

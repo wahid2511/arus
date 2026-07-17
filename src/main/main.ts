@@ -44,6 +44,34 @@ const TRAY_DOWNLOAD_LIMIT = 8
 const TRAY_REFRESH_INTERVAL_MS = 500
 const TRAY_FILE_NAME_LENGTH = 42
 
+function isLoginItemSupported(): boolean {
+  return (process.platform === 'win32' || process.platform === 'darwin') && app.isPackaged
+}
+
+function shouldStartHidden(): boolean {
+  if (process.argv.includes('--hidden')) {
+    return true
+  }
+  if (process.platform === 'darwin' && app.isPackaged) {
+    return app.getLoginItemSettings().wasOpenedAsHidden
+  }
+  return false
+}
+
+function syncDockVisibility(): void {
+  if (process.platform !== 'darwin') {
+    return
+  }
+  const hasVisibleWindow =
+    (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) ||
+    (captureWindow && !captureWindow.isDestroyed() && captureWindow.isVisible())
+  if (hasVisibleWindow) {
+    app.dock?.show()
+  } else {
+    app.dock?.hide()
+  }
+}
+
 const gotSingleInstanceLock = app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) {
   app.quit()
@@ -92,11 +120,13 @@ function createWindow(): void {
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show()
     mainWindow?.focus()
+    syncDockVisibility()
   })
   mainWindow.on('close', (event) => {
     if (!isQuitting) {
       event.preventDefault()
       mainWindow?.hide()
+      syncDockVisibility()
     }
   })
   mainWindow.on('closed', () => {
@@ -116,6 +146,7 @@ function focusMainWindow(): void {
   }
   mainWindow.show()
   mainWindow.focus()
+  syncDockVisibility()
 }
 
 function trayTaskPriority(task: DownloadTask): number {
@@ -135,8 +166,8 @@ function formatTrayFileName(fileName: string): string {
       ? normalized
       : `${normalized.slice(0, 25)}…${normalized.slice(-(TRAY_FILE_NAME_LENGTH - 26))}`
 
-  // Electron uses ampersands as menu mnemonic markers on Windows.
-  return shortened.replace(/&/g, '&&')
+  // Electron uses ampersands as menu mnemonic markers on Windows only.
+  return process.platform === 'win32' ? shortened.replace(/&/g, '&&') : shortened
 }
 
 function formatTrayTaskStatus(task: DownloadTask): string {
@@ -234,21 +265,37 @@ function createTray(): void {
     return
   }
   const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 })
+  if (process.platform === 'darwin') {
+    icon.setTemplateImage(true)
+  }
   tray = new Tray(icon)
   tray.setToolTip('Arus Download Manager')
   refreshTrayMenu()
-  tray.on('double-click', () => focusMainWindow())
+  if (process.platform === 'darwin') {
+    tray.on('click', () => focusMainWindow())
+  } else {
+    tray.on('double-click', () => focusMainWindow())
+  }
 }
 
 function applyLoginItemSetting(enabled: boolean): void {
-  if (process.platform !== 'win32' || !app.isPackaged) {
+  if (!isLoginItemSupported()) {
     return
   }
-  app.setLoginItemSettings({
-    openAtLogin: enabled,
-    path: process.execPath,
-    args: ['--hidden']
-  })
+  if (process.platform === 'win32') {
+    app.setLoginItemSettings({
+      openAtLogin: enabled,
+      path: process.execPath,
+      args: ['--hidden']
+    })
+    return
+  }
+  if (process.platform === 'darwin') {
+    app.setLoginItemSettings({
+      openAtLogin: enabled,
+      openAsHidden: enabled
+    })
+  }
 }
 
 function createCaptureWindow(): void {
@@ -294,6 +341,7 @@ function createCaptureWindow(): void {
     if (activePendingId) {
       captureWindow?.show()
       captureWindow?.focus()
+      syncDockVisibility()
     }
   })
   captureWindow.on('close', (event) => {
@@ -304,6 +352,7 @@ function createCaptureWindow(): void {
         activePendingId = null
       }
       captureWindow?.hide()
+      syncDockVisibility()
       showNextPending()
     }
   })
@@ -336,6 +385,7 @@ function showNextPending(): void {
   if (captureWindow && !captureWindow.webContents.isLoadingMainFrame()) {
     captureWindow.show()
     captureWindow.focus()
+    syncDockVisibility()
   }
 }
 
@@ -377,7 +427,7 @@ function getBrowserIntegrationStatus(): BrowserIntegrationStatus {
     chromeExtensionId: lastHostInstall?.chromeExtensionId || CHROME_EXTENSION_ID,
     firefoxExtensionId: FIREFOX_EXTENSION_ID,
     extensionPath: resolveExtensionDistPath(),
-    loginItemSupported: process.platform === 'win32' && app.isPackaged,
+    loginItemSupported: isLoginItemSupported(),
     lastError: lastHostInstall?.error
   }
 }
@@ -422,8 +472,10 @@ async function initializeApp(): Promise<void> {
     }
   }
 
-  if (!process.argv.includes('--hidden')) {
+  if (!shouldStartHidden()) {
     focusMainWindow()
+  } else {
+    syncDockVisibility()
   }
 
   app.on('activate', () => {

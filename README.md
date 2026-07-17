@@ -111,7 +111,7 @@ Native host berjalan sebagai proses Node ringan (`ELECTRON_RUN_AS_NODE`) — **b
 | Mesin unduhan | Node.js `http`/`https`, keep-alive agents |
 | Ekstensi | Manifest V3, TypeScript, `webextension-polyfill` |
 | Build ekstensi | Vite (esbuild), `web-ext` (paket Firefox) |
-| Packaging desktop | electron-builder (NSIS di Windows) |
+| Packaging desktop | electron-builder (NSIS di Windows, DMG/ZIP di macOS) |
 
 ---
 
@@ -149,8 +149,16 @@ genghero-download-manager/
 
 - **Node.js** 20+ (disarankan LTS)
 - **npm** 10+
-- Untuk build installer: toolchain OS masing-masing (NSIS di Windows)
+- Untuk build installer: toolchain OS masing-masing (NSIS di Windows; Xcode Command Line Tools di macOS untuk code signing opsional)
 - Browser: Chrome 88+, Edge, Brave, atau Firefox 128+ (MV3)
+
+### Catatan platform
+
+| Platform | Tray / lifecycle | Login item |
+|----------|------------------|------------|
+| **Windows** | System tray; tutup dashboard = sembunyikan ke tray | `openAtLogin` + argumen `--hidden` (rilis saja) |
+| **macOS** | Menu bar tray; dock disembunyikan saat tidak ada jendela | `openAtLogin` + `openAsHidden` (rilis saja) |
+| **Linux** | System tray (tergantung DE) | Belum didukung |
 
 ---
 
@@ -173,11 +181,25 @@ npm run dev
 
 Saat `npm run dev` berjalan:
 
-1. Arus membuka dashboard dan tetap berjalan di system tray saat dashboard ditutup.
+1. Arus membuka dashboard dan tetap berjalan di system tray / menu bar saat dashboard ditutup.
 2. Di **Pengaturan → Integrasi browser**, pastikan toggle aktif (native host terdaftar otomatis).
 3. Load ekstensi dari `extension/dist/chrome` (build dulu jika belum ada).
 
-Pada aplikasi yang sudah di-install, opsi **Jalankan Arus saat login Windows** memulai Arus dengan `--hidden`: dashboard tidak dibuka, tetapi tray dan native bridge langsung aktif. Mode dev tidak menulis startup entry Windows.
+Pada aplikasi yang sudah di-install, opsi **Jalankan Arus saat login** memulai Arus tersembunyi: dashboard tidak dibuka, tetapi tray/menu bar dan native bridge langsung aktif. Mode dev tidak menulis startup entry sistem.
+
+### macOS (pengembangan)
+
+```bash
+npm install
+cd extension && npm install && cd ..
+npm run build:extension
+npm run dev
+```
+
+- Ikon tray muncul di **menu bar** (kanan atas). Klik ikon untuk membuka dashboard.
+- Saat dashboard ditutup, ikon dock disembunyikan; Arus tetap berjalan di menu bar.
+- Native host manifest ditulis ke `~/Library/Application Support/<Browser>/NativeMessagingHosts/`.
+- Login item hanya aktif pada build rilis (`npm run dist` di macOS), bukan `npm run dev`.
 
 ---
 
@@ -187,7 +209,7 @@ Pada aplikasi yang sudah di-install, opsi **Jalankan Arus saat login Windows** m
 # Typecheck + bundle Electron (out/)
 npm run build
 
-# Build ekstensi + aplikasi + installer NSIS (release/)
+# Build ekstensi + aplikasi + installer (release/)
 npm run dist
 ```
 
@@ -196,10 +218,15 @@ Output:
 | Perintah | Hasil |
 |----------|-------|
 | `npm run build` | `out/main`, `out/preload`, `out/renderer` |
-| `npm run dist` | `release/Arus Setup x.x.x.exe` (Windows) + ekstensi di `extraResources` |
+| `npm run dist` (Windows) | `release/Arus Setup x.x.x.exe` + ekstensi di `extraResources` |
+| `npm run dist` (macOS) | `release/Arus-x.x.x.dmg`, `release/Arus-x.x.x-mac.zip` + ekstensi di `extraResources` |
+
+> Build macOS harus dijalankan di mesin macOS (electron-builder tidak cross-compile ke `.app`/DMG dari Windows).
 
 Data pengguna disimpan di folder `userData` Electron:
 
+- Windows: `%APPDATA%/Arus/`
+- macOS: `~/Library/Application Support/Arus/`
 - `arus-downloads.json` — daftar task
 - `arus-settings.json` — pengaturan
 - `native-messaging/` — launcher & manifest host
@@ -260,9 +287,13 @@ Klik ikon ekstensi Arus di toolbar browser. Popup harus menampilkan **Connected 
 | Windows (Edge) | `HKCU\Software\Microsoft\Edge\NativeMessagingHosts\...` |
 | Windows (Brave) | `HKCU\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\...` |
 | Windows (Firefox) | `HKCU\Software\Mozilla\NativeMessagingHosts\...` |
-| macOS / Linux | `NativeMessagingHosts/` di folder profil browser masing-masing |
+| macOS (Chrome) | `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.genghero.arus.json` |
+| macOS (Edge) | `~/Library/Application Support/Microsoft Edge/NativeMessagingHosts/...` |
+| macOS (Brave) | `~/Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts/...` |
+| macOS (Firefox) | `~/Library/Application Support/Mozilla/NativeMessagingHosts/...` |
+| Linux | `~/.config/<browser>/NativeMessagingHosts/` atau `~/.mozilla/native-messaging-hosts/` |
 
-Manifest host menunjuk ke launcher di `%APPDATA%/Arus/native-messaging/` (atau setara di OS lain).
+Manifest host menunjuk ke launcher di folder `userData` aplikasi (mis. `%APPDATA%/Arus/native-messaging/` di Windows, `~/Library/Application Support/Arus/native-messaging/` di macOS).
 
 ### Protokol pesan
 
@@ -314,7 +345,7 @@ Buka ikon ⚙ di aplikasi Arus.
 | **Koneksi paralel** | 8 | 4–16 koneksi HTTP per file |
 | **Tampilkan di folder saat selesai** | Aktif | Buka Explorer/Finder dan sorot file |
 | **Browser integration** | Aktif | Native host + pipe bridge |
-| **Jalankan saat login Windows** | Aktif (rilis) | Menjalankan Arus tersembunyi di tray; tidak diterapkan pada mode dev |
+| **Jalankan saat login** | Aktif (rilis) | Menjalankan Arus tersembunyi di tray/menu bar; tidak diterapkan pada mode dev |
 | **Pasang ulang native host** | — | Perbaiki registrasi jika ekstensi tidak terhubung |
 | **Buka folder ekstensi** | — | Membuka `extension/dist/chrome` (dev) atau salinan di `resources` (rilis) |
 
@@ -362,7 +393,14 @@ Saat unduhan datang dari ekstensi, header `Cookie`, `Referer`, dan `User-Agent` 
 
 ### Ekstensi: "Arus is not running"
 
-Proses Arus harus berjalan di system tray agar named pipe bridge aktif. Dashboard boleh ditutup. Gunakan menu tray **Buka Arus** untuk menampilkan dashboard atau **Keluar** untuk benar-benar menghentikan Arus.
+Proses Arus harus berjalan di system tray / menu bar agar named pipe bridge aktif. Dashboard boleh ditutup. Gunakan menu tray **Buka Arus** (atau klik ikon menu bar di macOS) untuk menampilkan dashboard atau **Keluar** untuk benar-benar menghentikan Arus.
+
+### macOS: ekstensi tidak terhubung setelah update
+
+1. Buka Arus → Pengaturan → **Pasang ulang native host**.
+2. Reload ekstensi di `chrome://extensions`.
+3. Pastikan Arus terlihat di menu bar (bukan hanya di dock).
+4. Jika app di-quarantine oleh Gatekeeper, hapus quarantine: `xattr -dr com.apple.quarantine /Applications/Arus.app` (sesuaikan path).
 
 ### Unduhan tidak diintercept
 

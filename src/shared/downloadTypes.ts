@@ -74,7 +74,7 @@ export interface AppSettings {
   revealOnComplete: boolean
   /** Accept downloads from browser extensions via native messaging. */
   browserIntegrationEnabled: boolean
-  /** Start the installed app hidden in the system tray when Windows signs in. */
+  /** Start the installed app hidden in the menu bar / system tray at OS login. */
   launchAtLogin: boolean
 }
 

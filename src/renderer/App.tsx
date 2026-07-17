@@ -511,7 +511,7 @@ export default function App(): ReactElement {
               </span>
 
               <label className="settings-toggle">
-                <span>Jalankan Arus saat login Windows</span>
+                <span>Jalankan Arus saat login</span>
                 <input
                   type="checkbox"
                   checked={settings.launchAtLogin}
@@ -523,8 +523,8 @@ export default function App(): ReactElement {
               </label>
               <span className="settings-hint">
                 {browserStatus?.loginItemSupported
-                  ? 'Arus dimulai tersembunyi di system tray agar ekstensi selalu siap.'
-                  : 'Tersedia pada aplikasi Arus yang sudah di-install; mode dev tidak mengubah startup Windows.'}
+                  ? 'Arus dimulai tersembunyi di menu bar / system tray agar ekstensi selalu siap.'
+                  : 'Tersedia pada aplikasi Arus yang sudah di-install; mode dev tidak mengubah startup sistem.'}
               </span>
 
               <div className="settings-section">

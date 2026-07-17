@@ -1,5 +1,5 @@
 import { createServer, type Server, type Socket } from 'node:net'
-import { existsSync, unlinkSync } from 'node:fs'
+import { chmodSync, existsSync, unlinkSync } from 'node:fs'
 import type { AddDownloadInput } from '../../shared/downloadTypes'
 import { PIPE_NAME, type BridgeRequest, type BridgeResponse } from './constants'
 
@@ -43,6 +43,13 @@ export class NativeBridgeServer {
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject)
       server.listen(PIPE_NAME, () => {
+        if (process.platform !== 'win32') {
+          try {
+            chmodSync(PIPE_NAME, 0o600)
+          } catch {
+            // ignore
+          }
+        }
         server.off('error', reject)
         resolve()
       })
