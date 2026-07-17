@@ -1,11 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, extname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { AddDownloadInput, AppSettings, DownloadTask } from '../shared/downloadTypes'
+import type { AddDownloadInput, AppSettings, DownloadTask, DownloadProgressEvent } from '../../shared/downloadTypes'
+import { clampConnections, nameFromUrl, normalizeUrl, safeFileName } from '../../shared/fileNaming'
 import {
   isAbortError,
-  SegmentedDownloader,
-  type DownloadProgressEvent
+  SegmentedDownloader
 } from './segmentedDownloader'
 
 type TaskUpdateHandler = (task: DownloadTask) => void
@@ -73,7 +73,9 @@ export class DownloadManager {
     const directory = input.directory || defaultDirectory
     mkdirSync(directory, { recursive: true })
 
-    const preferredName = input.fileName ? safeFileName(input.fileName) : safeFileName(nameFromUrl(url))
+    const preferredName = input.fileName
+      ? safeFileName(input.fileName, 'download.bin')
+      : safeFileName(nameFromUrl(url, 'download.bin'), 'download.bin')
     const filePath = uniquePath(join(directory, preferredName))
     const now = Date.now()
     const requestHeaders = normalizeHeaders(input.headers, input.referrer)
@@ -421,13 +423,6 @@ function saveSettings(path: string, settings: AppSettings): void {
   }
 }
 
-function clampConnections(value: number): number {
-  if (!Number.isFinite(value)) {
-    return DEFAULT_SETTINGS.connections
-  }
-  return Math.min(16, Math.max(4, Math.round(value)))
-}
-
 function normalizeHeaders(
   headers: Record<string, string> | undefined,
   referrer: string | undefined
@@ -438,26 +433,6 @@ function normalizeHeaders(
   }
   const keys = Object.keys(next)
   return keys.length ? next : undefined
-}
-
-function normalizeUrl(value: string): string {
-  const trimmed = value.trim()
-  const parsed = new URL(trimmed)
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error('Only HTTP and HTTPS URLs are supported')
-  }
-  return parsed.toString()
-}
-
-function nameFromUrl(url: string): string {
-  const parsed = new URL(url)
-  const lastSegment = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() || '')
-  return lastSegment || 'download.bin'
-}
-
-function safeFileName(name: string): string {
-  const cleaned = name.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim()
-  return cleaned || 'download.bin'
 }
 
 function uniquePath(filePath: string): string {

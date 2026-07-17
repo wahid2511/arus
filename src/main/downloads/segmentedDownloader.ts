@@ -7,23 +7,10 @@ import { createWriteStream } from 'node:fs'
 import { open, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import type { DownloadProgressEvent, DownloadSegment } from '../../shared/downloadTypes'
+import { clampConnections } from '../../shared/fileNaming'
 
-export interface SegmentState {
-  index: number
-  start: number
-  end: number
-  /** Bytes already written for this segment (0 … end-start+1). */
-  downloaded: number
-}
-
-export interface DownloadProgressEvent {
-  id: string
-  downloadedBytes: number
-  totalBytes: number | null
-  speedBytesPerSecond: number
-  percent: number
-  segments?: SegmentState[]
-}
+type SegmentState = DownloadSegment
 
 export interface SegmentedDownloaderOptions {
   id: string
@@ -677,13 +664,6 @@ function buildSegments(totalBytes: number, connections: number): SegmentState[] 
 
 function segmentLength(segment: SegmentState): number {
   return segment.end - segment.start + 1
-}
-
-function clampConnections(value: number): number {
-  if (!Number.isFinite(value)) {
-    return 8
-  }
-  return Math.min(16, Math.max(4, Math.round(value)))
 }
 
 function isRedirect(statusCode: number | undefined): boolean {

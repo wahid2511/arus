@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import type { AddDownloadInput, PendingDownload } from '../shared/downloadTypes'
+import type { AddDownloadInput, PendingDownload } from '../../shared/downloadTypes'
+import { nameFromUrl, normalizeUrl, safeFileName } from '../../shared/fileNaming'
 
 export type PendingDownloadInput = AddDownloadInput & {
   requestId?: string
@@ -75,32 +76,4 @@ function snapshot(pending: PendingDownload): PendingDownload {
     ...pending,
     headers: pending.headers ? { ...pending.headers } : undefined
   }
-}
-
-function normalizeUrl(value: string): string {
-  const parsed = new URL(value.trim())
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error('Only HTTP and HTTPS URLs are supported')
-  }
-  return parsed.toString()
-}
-
-function nameFromUrl(url: string): string {
-  try {
-    const pathname = new URL(url).pathname
-    const raw = pathname.split('/').filter(Boolean).pop()
-    return raw ? decodeURIComponent(raw) : 'download'
-  } catch {
-    return 'download'
-  }
-}
-
-function safeFileName(value: string): string {
-  const safe = value
-    .split(/[\\/]/)
-    .pop()!
-    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
-    .replace(/[. ]+$/g, '')
-    .trim()
-  return safe || 'download'
 }

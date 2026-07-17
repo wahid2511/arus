@@ -1,22 +1,24 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent, ReactElement } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import type { AppSettings, BrowserIntegrationStatus, DownloadTask } from '../shared/downloadTypes'
+import type { AppSettings, BrowserIntegrationStatus } from '../shared/downloadTypes'
 import DownloadRow from './components/DownloadRow'
-import type { DownloadRowData } from './components/DownloadRow'
 import Gauge from './components/Gauge'
 import ActionToolbar from './components/ActionToolbar'
 import { IconPlus, IconSettings } from './components/Icons'
 import Sidebar from './components/Sidebar'
 import type { SidebarFilter } from './components/Sidebar'
 import TitleBar from './components/TitleBar'
-import { formatBytes, formatEta, formatSpeed, splitSpeed } from './utils/format'
+import { countTasksByFilter, filterTasks, toDownloadRow } from './features/downloadList/taskHelpers'
+import { StatOrb } from './features/speedHero/StatOrb'
+import { useDownloads } from './hooks/useDownloads'
+import { spring } from './motion'
+import { formatSpeed, splitSpeed } from './utils/format'
 
 const GAUGE_MAX_BYTES_PER_SEC = 100 * 1024 * 1024
-const spring = { type: 'spring' as const, stiffness: 380, damping: 32, mass: 0.7 }
 
 export default function App(): ReactElement {
-  const [tasks, setTasks] = useState<DownloadTask[]>([])
+  const { tasks, refreshTasks, upsertLocalTask } = useDownloads()
   const [filter, setFilter] = useState<SidebarFilter>('all')
   const [peakSpeed, setPeakSpeed] = useState(0)
   const [expandedId, setExpandedId] = useState<string | null>(null)
@@ -35,37 +37,8 @@ export default function App(): ReactElement {
   const [message, setMessage] = useState('')
 
   useEffect(() => {
-    void window.downloads.list().then(setTasks)
     void window.downloads.getSettings().then(setSettings)
     void window.downloads.getBrowserIntegrationStatus().then(setBrowserStatus)
-
-    const offUpdated = window.downloads.onUpdated((task) => {
-      setTasks((current) => upsertTask(current, task))
-    })
-    const offSnapshot = window.downloads.onSnapshot(setTasks)
-    const offProgress = window.downloads.onProgress((progress) => {
-      setTasks((current) =>
-        current.map((task) =>
-          task.id === progress.id
-            ? {
-                ...task,
-                bytesReceived: progress.downloadedBytes,
-                totalBytes: progress.totalBytes,
-                progress: progress.percent,
-                speedBytesPerSecond: progress.speedBytesPerSecond,
-                segments: progress.segments ?? task.segments,
-                status: task.status === 'queued' ? 'downloading' : task.status
-              }
-            : task
-        )
-      )
-    })
-
-    return () => {
-      offUpdated()
-      offSnapshot()
-      offProgress()
-    }
   }, [])
 
   const stats = useMemo(() => {
@@ -75,18 +48,7 @@ export default function App(): ReactElement {
     return { active: active.length, queued: queued.length, totalSpeed }
   }, [tasks])
 
-  const filterCounts = useMemo(
-    () => ({
-      all: tasks.filter((task) => task.status !== 'cancelled').length,
-      downloading: tasks.filter((task) => task.status === 'downloading' || task.status === 'queued')
-        .length,
-      completed: tasks.filter((task) => task.status === 'completed').length,
-      paused: tasks.filter((task) => task.status === 'paused').length,
-      failed: tasks.filter((task) => task.status === 'failed').length,
-      trash: tasks.filter((task) => task.status === 'cancelled').length
-    }),
-    [tasks]
-  )
+  const filterCounts = useMemo(() => countTasksByFilter(tasks), [tasks])
 
   useEffect(() => {
     if (stats.totalSpeed > peakSpeed) {
@@ -94,29 +56,9 @@ export default function App(): ReactElement {
     }
   }, [stats.totalSpeed, peakSpeed])
 
-  const filteredTasks = useMemo(() => {
-    const sorted = [...tasks].sort((a, b) => weight(b) - weight(a) || b.createdAt - a.createdAt)
+  const filteredTasks = useMemo(() => filterTasks(tasks, filter), [tasks, filter])
 
-    switch (filter) {
-      case 'downloading':
-        return sorted.filter((task) => task.status === 'downloading' || task.status === 'queued')
-      case 'completed':
-        return sorted.filter((task) => task.status === 'completed')
-      case 'paused':
-        return sorted.filter((task) => task.status === 'paused')
-      case 'failed':
-        return sorted.filter((task) => task.status === 'failed')
-      case 'trash':
-        return sorted.filter((task) => task.status === 'cancelled')
-      default:
-        return sorted.filter((task) => task.status !== 'cancelled')
-    }
-  }, [tasks, filter])
-
-  const rows: DownloadRowData[] = useMemo(
-    () => filteredTasks.map(toDownloadRow),
-    [filteredTasks]
-  )
+  const rows = useMemo(() => filteredTasks.map(toDownloadRow), [filteredTasks])
 
   const visibleIds = useMemo(() => rows.map((row) => row.id), [rows])
   const selectedVisible = useMemo(
@@ -162,7 +104,7 @@ export default function App(): ReactElement {
 
     try {
       const task = await window.downloads.add({ url, directory: directory || undefined })
-      setTasks((current) => upsertTask(current, task))
+      upsertLocalTask(task)
       setUrl('')
       setDialogOpen(false)
     } catch (error) {
@@ -234,8 +176,7 @@ export default function App(): ReactElement {
   }
 
   async function refreshAfterBulk(): Promise<void> {
-    const list = await window.downloads.list()
-    setTasks(list)
+    await refreshTasks()
   }
 
   return (
@@ -594,97 +535,4 @@ export default function App(): ReactElement {
       </AnimatePresence>
     </div>
   )
-}
-
-function StatOrb({
-  label,
-  value,
-  accent,
-  wide
-}: {
-  label: string
-  value: string
-  accent?: 'teal'
-  wide?: boolean
-}): ReactElement {
-  return (
-    <motion.div
-      className={`stat-orb${wide ? ' stat-orb--wide' : ''}${accent === 'teal' ? ' stat-orb--teal' : ''}`}
-      layout
-      transition={spring}
-    >
-      <div className="stat-orb__label">{label}</div>
-      <div className="stat-orb__value mono">{value}</div>
-    </motion.div>
-  )
-}
-
-function weight(task: DownloadTask): number {
-  switch (task.status) {
-    case 'downloading':
-      return 50
-    case 'queued':
-      return 40
-    case 'paused':
-      return 30
-    case 'failed':
-      return 20
-    case 'completed':
-      return 10
-    default:
-      return 0
-  }
-}
-
-function toDownloadRow(task: DownloadTask): DownloadRowData {
-  return {
-    id: task.id,
-    fileName: task.fileName,
-    progress: task.progress,
-    status: task.status,
-    meta: buildMeta(task),
-    url: task.url,
-    filePath: task.filePath,
-    segments: task.segments,
-    speedBytesPerSecond: task.speedBytesPerSecond
-  }
-}
-
-function buildMeta(task: DownloadTask): string {
-  const received = formatBytes(task.bytesReceived)
-  const total = task.totalBytes ? formatBytes(task.totalBytes) : '?'
-
-  if (task.status === 'completed') {
-    const time = new Date(task.updatedAt).toLocaleTimeString('id-ID', {
-      hour: '2-digit',
-      minute: '2-digit'
-    })
-    return `${total} selesai · ${time}`
-  }
-
-  if (task.status === 'paused') {
-    return `${received} / ${total} · dijeda`
-  }
-
-  if (task.status === 'failed') {
-    return task.error ? `${received} / ${total} · ${task.error}` : `${received} / ${total} · gagal`
-  }
-
-  if (task.status === 'cancelled') {
-    return `${received} / ${total} · dibatalkan`
-  }
-
-  if (task.status === 'queued') {
-    return `${received} / ${total} · antrean`
-  }
-
-  const remaining = task.totalBytes ? Math.max(0, task.totalBytes - task.bytesReceived) : 0
-  const eta = formatEta(remaining, task.speedBytesPerSecond)
-  return `${received} / ${total} · ${formatSpeed(task.speedBytesPerSecond)} · ${eta}`
-}
-
-function upsertTask(tasks: DownloadTask[], updated: DownloadTask): DownloadTask[] {
-  const exists = tasks.some((task) => task.id === updated.id)
-  const next = exists ? tasks.map((task) => (task.id === updated.id ? updated : task)) : [updated, ...tasks]
-  return next.sort((a, b) => b.createdAt - a.createdAt)
 }

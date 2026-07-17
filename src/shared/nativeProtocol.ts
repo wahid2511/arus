@@ -1,14 +1,9 @@
-/** Keep in sync with src/shared/nativeProtocol.ts */
-/** Shared constant: must match Electron native host registration. */
+/** Shared native-messaging contract (keep extension/src/shared/protocol.ts in sync). */
 export const NATIVE_HOST_NAME = 'com.genghero.arus'
-
-/** Stable unpacked Chrome extension ID (from embedded manifest key). */
 export const CHROME_EXTENSION_ID = 'pnmkpgoolmmekpecphmakboegpajanmc'
-
-/** Firefox add-on ID (gecko). */
 export const FIREFOX_EXTENSION_ID = 'arus@genghero.com'
 
-export type NativeRequest =
+export type BridgeRequest =
   | { type: 'ping' }
   | {
       type: 'download'
@@ -21,16 +16,8 @@ export type NativeRequest =
       cookie?: string
     }
 
-export type NativeResponse =
+export type BridgeResponse =
   | { type: 'pong'; ok: true; version: string; app: 'Arus' }
   | { type: 'download-pending'; ok: true; id: string }
   | { type: 'download-result'; ok: true; id: string }
   | { type: 'error'; ok: false; error: string }
-
-export interface ExtensionSettings {
-  captureEnabled: boolean
-  /** Minimum bytes before auto-capture (0 = capture all eligible). */
-  minBytes: number
-  /** Comma/space-ish list of extensions to always capture, e.g. zip,exe,msi */
-  alwaysCaptureExtensions: string
-}

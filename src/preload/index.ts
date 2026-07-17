@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import { IPC, IPC_EVENTS } from '../shared/ipcChannels'
 import type {
   AddDownloadInput,
   AppSettings,
@@ -11,64 +12,63 @@ import type {
 } from '../shared/downloadTypes'
 
 const downloadsApi: DownloadsApi = {
-  add: (input: AddDownloadInput) => ipcRenderer.invoke('downloads:add', input),
-  list: () => ipcRenderer.invoke('downloads:list'),
-  pause: (id: string) => ipcRenderer.invoke('downloads:pause', id),
-  resume: (id: string) => ipcRenderer.invoke('downloads:resume', id),
-  cancel: (id: string) => ipcRenderer.invoke('downloads:cancel', id),
-  remove: (id: string) => ipcRenderer.invoke('downloads:remove', id),
-  pauseAll: () => ipcRenderer.invoke('downloads:pause-all'),
-  resumeMany: (ids: string[]) => ipcRenderer.invoke('downloads:resume-many', ids),
-  pauseMany: (ids: string[]) => ipcRenderer.invoke('downloads:pause-many', ids),
-  removeMany: (ids: string[]) => ipcRenderer.invoke('downloads:remove-many', ids),
-  removeCompleted: () => ipcRenderer.invoke('downloads:remove-completed'),
-  revealInFolder: (id: string) => ipcRenderer.invoke('downloads:reveal-in-folder', id),
-  chooseDirectory: () => ipcRenderer.invoke('downloads:choose-directory'),
-  getSettings: () => ipcRenderer.invoke('downloads:get-settings'),
+  add: (input: AddDownloadInput) => ipcRenderer.invoke(IPC.downloads.add, input),
+  list: () => ipcRenderer.invoke(IPC.downloads.list),
+  pause: (id: string) => ipcRenderer.invoke(IPC.downloads.pause, id),
+  resume: (id: string) => ipcRenderer.invoke(IPC.downloads.resume, id),
+  cancel: (id: string) => ipcRenderer.invoke(IPC.downloads.cancel, id),
+  remove: (id: string) => ipcRenderer.invoke(IPC.downloads.remove, id),
+  pauseAll: () => ipcRenderer.invoke(IPC.downloads.pauseAll),
+  resumeMany: (ids: string[]) => ipcRenderer.invoke(IPC.downloads.resumeMany, ids),
+  pauseMany: (ids: string[]) => ipcRenderer.invoke(IPC.downloads.pauseMany, ids),
+  removeMany: (ids: string[]) => ipcRenderer.invoke(IPC.downloads.removeMany, ids),
+  removeCompleted: () => ipcRenderer.invoke(IPC.downloads.removeCompleted),
+  revealInFolder: (id: string) => ipcRenderer.invoke(IPC.downloads.revealInFolder, id),
+  chooseDirectory: () => ipcRenderer.invoke(IPC.downloads.chooseDirectory),
+  getSettings: () => ipcRenderer.invoke(IPC.downloads.getSettings),
   setSettings: (settings: Partial<AppSettings>) =>
-    ipcRenderer.invoke('downloads:set-settings', settings),
+    ipcRenderer.invoke(IPC.downloads.setSettings, settings),
   getBrowserIntegrationStatus: () =>
-    ipcRenderer.invoke('downloads:browser-integration-status') as Promise<BrowserIntegrationStatus>,
+    ipcRenderer.invoke(IPC.downloads.browserIntegrationStatus) as Promise<BrowserIntegrationStatus>,
   installNativeHost: () =>
-    ipcRenderer.invoke('downloads:install-native-host') as Promise<BrowserIntegrationStatus>,
+    ipcRenderer.invoke(IPC.downloads.installNativeHost) as Promise<BrowserIntegrationStatus>,
   openExtensionFolder: () =>
-    ipcRenderer.invoke('downloads:open-extension-folder') as Promise<string | null>,
-  listPending: () =>
-    ipcRenderer.invoke('downloads:list-pending') as Promise<PendingDownload[]>,
+    ipcRenderer.invoke(IPC.downloads.openExtensionFolder) as Promise<string | null>,
+  listPending: () => ipcRenderer.invoke(IPC.downloads.listPending) as Promise<PendingDownload[]>,
   confirmPending: (input: ConfirmPendingDownloadInput) =>
-    ipcRenderer.invoke('downloads:confirm-pending', input) as Promise<DownloadTask>,
-  rejectPending: (id: string) => ipcRenderer.invoke('downloads:reject-pending', id),
+    ipcRenderer.invoke(IPC.downloads.confirmPending, input) as Promise<DownloadTask>,
+  rejectPending: (id: string) => ipcRenderer.invoke(IPC.downloads.rejectPending, id),
   onPending: (callback: (pending: PendingDownload | null) => void) => {
     const listener = (
       _event: Electron.IpcRendererEvent,
       pending: PendingDownload | null
     ): void => callback(pending)
-    ipcRenderer.on('downloads:pending', listener)
-    return () => ipcRenderer.removeListener('downloads:pending', listener)
+    ipcRenderer.on(IPC_EVENTS.downloadsPending, listener)
+    return () => ipcRenderer.removeListener(IPC_EVENTS.downloadsPending, listener)
   },
   onUpdated: (callback: (task: DownloadTask) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, task: DownloadTask): void => callback(task)
-    ipcRenderer.on('downloads:updated', listener)
-    return () => ipcRenderer.removeListener('downloads:updated', listener)
+    ipcRenderer.on(IPC_EVENTS.downloadsUpdated, listener)
+    return () => ipcRenderer.removeListener(IPC_EVENTS.downloadsUpdated, listener)
   },
   onSnapshot: (callback: (tasks: DownloadTask[]) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, tasks: DownloadTask[]): void =>
       callback(tasks)
-    ipcRenderer.on('downloads:snapshot', listener)
-    return () => ipcRenderer.removeListener('downloads:snapshot', listener)
+    ipcRenderer.on(IPC_EVENTS.downloadsSnapshot, listener)
+    return () => ipcRenderer.removeListener(IPC_EVENTS.downloadsSnapshot, listener)
   },
   onProgress: (callback: (progress: DownloadProgressEvent) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, progress: DownloadProgressEvent): void =>
       callback(progress)
-    ipcRenderer.on('download:progress', listener)
-    return () => ipcRenderer.removeListener('download:progress', listener)
+    ipcRenderer.on(IPC_EVENTS.downloadProgress, listener)
+    return () => ipcRenderer.removeListener(IPC_EVENTS.downloadProgress, listener)
   }
 }
 
 const windowControlsApi = {
-  minimize: () => ipcRenderer.send('window:minimize'),
-  maximize: () => ipcRenderer.send('window:maximize'),
-  close: () => ipcRenderer.send('window:close')
+  minimize: () => ipcRenderer.send(IPC.window.minimize),
+  maximize: () => ipcRenderer.send(IPC.window.maximize),
+  close: () => ipcRenderer.send(IPC.window.close)
 }
 
 contextBridge.exposeInMainWorld('downloads', downloadsApi)
