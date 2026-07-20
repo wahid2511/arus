@@ -2,7 +2,15 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from '
 import { dirname, extname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { AddDownloadInput, AppSettings, DownloadTask, DownloadProgressEvent } from '../../shared/downloadTypes'
-import { clampConnections, nameFromUrl, normalizeUrl, safeFileName } from '../../shared/fileNaming'
+import {
+  clampConnections,
+  clampMaxConcurrentDownloads,
+  clampMaxSegmentRetries,
+  clampMinSegmentSizeBytes,
+  nameFromUrl,
+  normalizeUrl,
+  safeFileName
+} from '../../shared/fileNaming'
 import {
   isAbortError,
   SegmentedDownloader
@@ -18,9 +26,11 @@ type InternalTask = DownloadTask & {
   downloader?: SegmentedDownloader
 }
 
-const MAX_CONCURRENT_DOWNLOADS = 3
 const DEFAULT_SETTINGS: AppSettings = {
   connections: 8,
+  maxConcurrentDownloads: 3,
+  minSegmentSizeBytes: 512 * 1024,
+  maxSegmentRetries: 3,
   revealOnComplete: true,
   browserIntegrationEnabled: true,
   launchAtLogin: true
@@ -55,6 +65,17 @@ export class DownloadManager {
     if (typeof partial.connections === 'number') {
       this.settings.connections = clampConnections(partial.connections)
     }
+    if (typeof partial.maxConcurrentDownloads === 'number') {
+      this.settings.maxConcurrentDownloads = clampMaxConcurrentDownloads(
+        partial.maxConcurrentDownloads
+      )
+    }
+    if (typeof partial.minSegmentSizeBytes === 'number') {
+      this.settings.minSegmentSizeBytes = clampMinSegmentSizeBytes(partial.minSegmentSizeBytes)
+    }
+    if (typeof partial.maxSegmentRetries === 'number') {
+      this.settings.maxSegmentRetries = clampMaxSegmentRetries(partial.maxSegmentRetries)
+    }
     if (typeof partial.revealOnComplete === 'boolean') {
       this.settings.revealOnComplete = partial.revealOnComplete
     }
@@ -65,6 +86,7 @@ export class DownloadManager {
       this.settings.launchAtLogin = partial.launchAtLogin
     }
     saveSettings(this.settingsPath, this.settings)
+    this.pumpQueue()
     return this.getSettings()
   }
 
@@ -237,7 +259,7 @@ export class DownloadManager {
 
   private pumpQueue(): void {
     const activeCount = [...this.tasks.values()].filter((task) => task.status === 'downloading').length
-    const freeSlots = MAX_CONCURRENT_DOWNLOADS - activeCount
+    const freeSlots = this.settings.maxConcurrentDownloads - activeCount
     if (freeSlots <= 0) {
       return
     }
@@ -259,6 +281,8 @@ export class DownloadManager {
       tempPath: task.tempPath,
       metaPath: task.metaPath,
       connections: this.settings.connections,
+      minSegmentSizeBytes: this.settings.minSegmentSizeBytes,
+      maxRetries: this.settings.maxSegmentRetries,
       requestHeaders: task.requestHeaders,
       onProgress: (progress) => this.handleProgress(task, progress)
     })
@@ -397,6 +421,15 @@ function loadSettings(path: string): AppSettings {
 
     const settings: AppSettings = {
       connections: clampConnections(parsed.connections ?? DEFAULT_SETTINGS.connections),
+      maxConcurrentDownloads: clampMaxConcurrentDownloads(
+        parsed.maxConcurrentDownloads ?? DEFAULT_SETTINGS.maxConcurrentDownloads
+      ),
+      minSegmentSizeBytes: clampMinSegmentSizeBytes(
+        parsed.minSegmentSizeBytes ?? DEFAULT_SETTINGS.minSegmentSizeBytes
+      ),
+      maxSegmentRetries: clampMaxSegmentRetries(
+        parsed.maxSegmentRetries ?? DEFAULT_SETTINGS.maxSegmentRetries
+      ),
       revealOnComplete:
         typeof parsed.revealOnComplete === 'boolean'
           ? parsed.revealOnComplete

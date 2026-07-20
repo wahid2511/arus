@@ -70,6 +70,12 @@ export interface DownloadProgressEvent {
 export interface AppSettings {
   /** Parallel connections per download (4–16). */
   connections: number
+  /** Maximum downloads running at once in the queue (1–10). */
+  maxConcurrentDownloads: number
+  /** Minimum remaining bytes before a segment may be split further. */
+  minSegmentSizeBytes: number
+  /** Per-segment retry attempts before the download fails. */
+  maxSegmentRetries: number
   /** Reveal the file in Explorer/Finder when a download finishes. */
   revealOnComplete: boolean
   /** Accept downloads from browser extensions via native messaging. */

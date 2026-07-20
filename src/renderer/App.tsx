@@ -31,6 +31,9 @@ export default function App(): ReactElement {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [settings, setSettings] = useState<AppSettings>({
     connections: 8,
+    maxConcurrentDownloads: 3,
+    minSegmentSizeBytes: 512 * 1024,
+    maxSegmentRetries: 3,
     revealOnComplete: true,
     browserIntegrationEnabled: true,
     launchAtLogin: true

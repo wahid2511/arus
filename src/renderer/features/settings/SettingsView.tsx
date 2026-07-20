@@ -3,6 +3,13 @@ import { motion } from 'framer-motion'
 import type { AppSettings, BrowserIntegrationStatus } from '../../../shared/downloadTypes'
 import { spring } from '../../motion'
 
+const MIN_SEGMENT_PRESETS = [
+  { label: '256 KB', value: 256 * 1024 },
+  { label: '512 KB', value: 512 * 1024 },
+  { label: '1 MB', value: 1024 * 1024 },
+  { label: '2 MB', value: 2 * 1024 * 1024 }
+]
+
 export interface SettingsViewProps {
   settings: AppSettings
   browserStatus: BrowserIntegrationStatus | null
@@ -71,6 +78,76 @@ export function SettingsView({
                 onChange={(event) => void onSaveConnections(Number(event.target.value))}
               />
               <span className="settings-range__value mono">{settings.connections}</span>
+            </div>
+          </label>
+
+          <label className="setting-row setting-row--range">
+            <span>
+              <strong>Unduhan paralel maksimum</strong>
+              <small>
+                Berapa banyak file yang boleh berjalan bersamaan di antrean. Sisanya menunggu
+                sampai ada slot kosong.
+              </small>
+            </span>
+            <div className="settings-range">
+              <input
+                type="range"
+                min={1}
+                max={10}
+                step={1}
+                value={settings.maxConcurrentDownloads}
+                onChange={(event) =>
+                  void onSaveSettings({ maxConcurrentDownloads: Number(event.target.value) })
+                }
+              />
+              <span className="settings-range__value mono">{settings.maxConcurrentDownloads}</span>
+            </div>
+          </label>
+
+          <label className="setting-row setting-row--range">
+            <span>
+              <strong>Ukuran minimum segmen</strong>
+              <small>
+                Ambang sisa byte sebelum Arus berhenti membagi segmen. Nilai lebih besar mengurangi
+                overhead request; lebih kecil meningkatkan paralelisme pada file sedang.
+              </small>
+            </span>
+            <div className="settings-range">
+              <select
+                value={nearestPreset(settings.minSegmentSizeBytes)}
+                onChange={(event) =>
+                  void onSaveSettings({ minSegmentSizeBytes: Number(event.target.value) })
+                }
+              >
+                {MIN_SEGMENT_PRESETS.map((preset) => (
+                  <option key={preset.value} value={preset.value}>
+                    {preset.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </label>
+
+          <label className="setting-row setting-row--range">
+            <span>
+              <strong>Retry per segmen</strong>
+              <small>
+                Berapa kali Arus mencoba ulang satu koneksi yang gagal sebelum menandai unduhan
+                gagal.
+              </small>
+            </span>
+            <div className="settings-range">
+              <input
+                type="range"
+                min={0}
+                max={10}
+                step={1}
+                value={settings.maxSegmentRetries}
+                onChange={(event) =>
+                  void onSaveSettings({ maxSegmentRetries: Number(event.target.value) })
+                }
+              />
+              <span className="settings-range__value mono">{settings.maxSegmentRetries}</span>
             </div>
           </label>
 
@@ -176,4 +253,17 @@ export function SettingsView({
       </div>
     </motion.section>
   )
+}
+
+function nearestPreset(value: number): number {
+  let best = MIN_SEGMENT_PRESETS[1]!.value
+  let bestDelta = Number.POSITIVE_INFINITY
+  for (const preset of MIN_SEGMENT_PRESETS) {
+    const delta = Math.abs(preset.value - value)
+    if (delta < bestDelta) {
+      best = preset.value
+      bestDelta = delta
+    }
+  }
+  return best
 }

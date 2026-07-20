@@ -601,6 +601,16 @@ input[type='checkbox'] {
   background: transparent;
 }
 
+.settings-range select {
+  min-width: 7rem;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--color-border) 80%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, #fff 55%, transparent);
+  color: var(--color-text-primary);
+  font: inherit;
+}
+
 .settings-range__value {
   min-width: 1.5rem;
   font-size: 14px;

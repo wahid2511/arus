@@ -3,14 +3,22 @@ import https from 'node:https'
 import type { ClientRequest, IncomingMessage } from 'node:http'
 import { Agent as HttpAgent } from 'node:http'
 import { Agent as HttpsAgent } from 'node:https'
+import { createHash } from 'node:crypto'
 import { createWriteStream } from 'node:fs'
-import { open, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { open, readFile, rename, unlink, writeFile, stat } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { createReadStream, existsSync } from 'node:fs'
 import type { DownloadProgressEvent, DownloadSegment } from '../../shared/downloadTypes'
-import { clampConnections } from '../../shared/fileNaming'
-
-type SegmentState = DownloadSegment
+import {
+  clampConnections,
+  clampMaxSegmentRetries,
+  clampMinSegmentSizeBytes
+} from '../../shared/fileNaming'
+import {
+  DynamicSegmentPlanner,
+  segmentLength,
+  type PlannedSegment
+} from './dynamicSegmentPlanner'
 
 export interface SegmentedDownloaderOptions {
   id: string
@@ -21,6 +29,8 @@ export interface SegmentedDownloaderOptions {
   metaPath: string
   /** Parallel HTTP connections, typically 4–16. */
   connections: number
+  /** Minimum remaining bytes before a segment may be split. */
+  minSegmentSizeBytes?: number
   /** Extra request headers from the browser companion (Cookie, Referer, …). */
   requestHeaders?: Record<string, string>
   maxRetries?: number
@@ -29,25 +39,63 @@ export interface SegmentedDownloaderOptions {
   onProgress: (progress: DownloadProgressEvent) => void
 }
 
+type ProbeResult = {
+  url: string
+  supportsRanges: boolean
+  totalBytes: number | null
+  contentDisposition: string | null
+  etag: string | null
+  lastModified: string | null
+  contentMd5: string | null
+}
+
 type MetaFile = {
+  version: 2
   url: string
   totalBytes: number
-  segments: SegmentState[]
+  segments: DownloadSegment[]
   connections: number
+  minSegmentSizeBytes: number
+  etag: string | null
+  lastModified: string | null
+  contentMd5: string | null
+  contentDisposition: string | null
+  mode: 'segmented' | 'single'
 }
 
 type AbortReason = 'paused' | 'cancelled' | null
 
 const PROGRESS_INTERVAL_MS = 250
+const META_INTERVAL_MS = 400
+const META_BYTE_INTERVAL = 256 * 1024
 const DEFAULT_MAX_RETRIES = 3
-const MIN_SEGMENT_BYTES = 256 * 1024
+const DEFAULT_MIN_SEGMENT_BYTES = 512 * 1024
+const REQUEST_TIMEOUT_MS = 30_000
+const META_VERSION = 2 as const
 
 const sharedHttpAgent = new HttpAgent({ keepAlive: true, maxSockets: 32, maxFreeSockets: 16 })
 const sharedHttpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 32, maxFreeSockets: 16 })
 
+export class RangeSupportLostError extends Error {
+  constructor(message = 'Server no longer supports byte ranges') {
+    super(message)
+    this.name = 'RangeSupportLostError'
+  }
+}
+
+export function isRangeSupportLostError(error: unknown): error is RangeSupportLostError {
+  return (
+    error instanceof RangeSupportLostError ||
+    (error instanceof Error && error.name === 'RangeSupportLostError')
+  )
+}
+
 export class SegmentedDownloader {
   private readonly options: Required<
-    Pick<SegmentedDownloaderOptions, 'maxRetries' | 'maxConcurrentWrites'>
+    Pick<
+      SegmentedDownloaderOptions,
+      'maxRetries' | 'maxConcurrentWrites' | 'minSegmentSizeBytes'
+    >
   > &
     SegmentedDownloaderOptions
 
@@ -60,14 +108,26 @@ export class SegmentedDownloader {
   private speedBytesPerSecond = 0
   private downloadedBytes = 0
   private totalBytes: number | null = null
-  private segments: SegmentState[] = []
+  private segments: DownloadSegment[] = []
   private resolvedUrl: string
   private metaChain: Promise<void> = Promise.resolve()
+  private planner: DynamicSegmentPlanner | null = null
+  private etag: string | null = null
+  private lastModified: string | null = null
+  private contentMd5: string | null = null
+  private contentDisposition: string | null = null
+  private bytesSinceMeta = 0
+  private metaWriteQueued = false
+  private lastMetaWrite = 0
+  private rangeFallbackRequested = false
 
   constructor(options: SegmentedDownloaderOptions) {
     this.options = {
-      maxRetries: DEFAULT_MAX_RETRIES,
       ...options,
+      maxRetries: clampMaxSegmentRetries(options.maxRetries ?? DEFAULT_MAX_RETRIES),
+      minSegmentSizeBytes: clampMinSegmentSizeBytes(
+        options.minSegmentSizeBytes ?? DEFAULT_MIN_SEGMENT_BYTES
+      ),
       connections: clampConnections(options.connections),
       // FileHandle is not safe for concurrent writes — keep disk I/O serial while
       // HTTP segments stay parallel (each segment back-pressures on its write).
@@ -81,25 +141,43 @@ export class SegmentedDownloader {
     this.lastProgressAt = Date.now()
     this.lastProgressBytes = 0
     this.speedBytesPerSecond = 0
+    this.rangeFallbackRequested = false
 
     try {
       const probe = await this.probe(this.resolvedUrl)
       this.resolvedUrl = probe.url
+      this.etag = probe.etag
+      this.lastModified = probe.lastModified
+      this.contentMd5 = probe.contentMd5
+      this.contentDisposition = probe.contentDisposition
 
       if (probe.supportsRanges && probe.totalBytes && probe.totalBytes > 0) {
-        await this.downloadSegmented(probe.totalBytes)
+        try {
+          await this.downloadSegmented(probe.totalBytes)
+        } catch (error) {
+          if (isRangeSupportLostError(error) || this.rangeFallbackRequested) {
+            await this.closeFileHandle().catch(() => undefined)
+            await this.resetPartFiles()
+            await this.downloadSingle(probe.totalBytes)
+          } else {
+            throw error
+          }
+        }
       } else {
         await this.downloadSingle(probe.totalBytes)
       }
 
       this.throwIfAborted()
-
       await this.closeFileHandle()
+      await this.validateCompletedFile()
       await rename(this.options.tempPath, this.options.filePath)
       await removeQuiet(this.options.metaPath)
       this.emitProgress(true)
     } catch (error) {
       await this.closeFileHandle().catch(() => undefined)
+      if (this.abortReason === 'paused') {
+        await this.persistMeta(true).catch(() => undefined)
+      }
       throw error
     }
   }
@@ -119,39 +197,94 @@ export class SegmentedDownloader {
     const resumed = await this.loadMeta(totalBytes)
 
     if (!resumed) {
-      this.segments = buildSegments(totalBytes, this.options.connections)
+      this.planner = new DynamicSegmentPlanner(totalBytes, this.options.minSegmentSizeBytes)
+      this.planner.bootstrap()
       this.downloadedBytes = 0
+      this.syncSegmentsFromPlanner()
       await this.preallocate(totalBytes)
-      await this.persistMeta()
+      await this.persistMeta(true)
     } else {
-      this.downloadedBytes = this.segments.reduce((sum, segment) => sum + segment.downloaded, 0)
+      this.downloadedBytes = this.planner!.totalDownloaded()
+      this.syncSegmentsFromPlanner()
       this.fileHandle = await open(this.options.tempPath, 'r+')
     }
 
     this.emitProgress(true)
-
-    const pending = this.segments.filter((segment) => segment.downloaded < segmentLength(segment))
-    await Promise.all(pending.map((segment) => this.downloadSegmentWithRetry(segment)))
-
+    await this.runWorkerPool()
     this.throwIfAborted()
 
-    const complete = this.segments.every((segment) => segment.downloaded >= segmentLength(segment))
-    if (!complete) {
+    if (!this.planner?.allComplete() || !this.planner.coversFullFile()) {
       throw new Error('Download incomplete')
     }
   }
 
-  private async downloadSegmentWithRetry(segment: SegmentState): Promise<void> {
+  private async runWorkerPool(): Promise<void> {
+    if (!this.planner) {
+      throw new Error('Planner is not initialized')
+    }
+
+    const workerCount = this.options.connections
+    const workers = Array.from({ length: workerCount }, (_, workerId) =>
+      this.workerLoop(workerId)
+    )
+    await Promise.all(workers)
+  }
+
+  private async workerLoop(_workerId: number): Promise<void> {
+    while (!this.abortReason) {
+      if (!this.planner) {
+        return
+      }
+
+      if (this.planner.allComplete()) {
+        return
+      }
+
+      const work = this.planner.claimWork()
+      if (!work) {
+        // Another worker may still be downloading a range too small to split.
+        await sleep(25)
+        if (this.planner.allComplete() || this.abortReason) {
+          return
+        }
+        // If nothing is active and nothing claimable, we are stuck or done.
+        const anyActive = this.planner.getSegments().some((segment) => segment.active)
+        if (!anyActive) {
+          return
+        }
+        continue
+      }
+
+      try {
+        await this.downloadSegmentWithRetry(work)
+      } finally {
+        this.planner.markActive(work.index, false)
+      }
+    }
+  }
+
+  private async downloadSegmentWithRetry(segment: PlannedSegment): Promise<void> {
     let attempt = 0
 
     while (true) {
       this.throwIfAborted()
 
+      // Segment may already be complete after a concurrent shrink + finish.
+      const current = this.planner?.findByIndex(segment.index)
+      if (!current || this.planner!.isComplete(current)) {
+        return
+      }
+
       try {
-        await this.downloadSegment(segment)
+        await this.downloadSegment(current)
         return
       } catch (error) {
         if (this.abortReason) {
+          throw error
+        }
+        if (isRangeSupportLostError(error)) {
+          this.rangeFallbackRequested = true
+          this.destroyRequests()
           throw error
         }
 
@@ -166,20 +299,27 @@ export class SegmentedDownloader {
     }
   }
 
-  private downloadSegment(segment: SegmentState): Promise<void> {
+  private downloadSegment(segment: PlannedSegment): Promise<void> {
     return new Promise((resolve, reject) => {
-      const absoluteStart = segment.start + segment.downloaded
-      if (absoluteStart > segment.end) {
+      const live = this.planner?.findByIndex(segment.index)
+      if (!live) {
+        resolve()
+        return
+      }
+
+      const absoluteStart = live.start + live.downloaded
+      if (absoluteStart > live.end) {
         resolve()
         return
       }
 
       const headers: Record<string, string> = {
-        Range: `bytes=${absoluteStart}-${segment.end}`
+        Range: `bytes=${absoluteStart}-${live.end}`
       }
+      this.applyValidators(headers)
 
       const request = this.request(this.resolvedUrl, { headers }, (response) => {
-        void this.handleSegmentResponse(segment, request, response, absoluteStart, 0)
+        void this.handleSegmentResponse(live, request, response, absoluteStart, 0)
           .then(resolve)
           .catch(reject)
       })
@@ -189,7 +329,7 @@ export class SegmentedDownloader {
   }
 
   private async handleSegmentResponse(
-    segment: SegmentState,
+    segment: PlannedSegment,
     request: ClientRequest,
     response: IncomingMessage,
     absoluteStart: number,
@@ -207,20 +347,21 @@ export class SegmentedDownloader {
       return
     }
 
+    if (response.statusCode === 200) {
+      response.resume()
+      throw new RangeSupportLostError()
+    }
+
     if (response.statusCode !== 206) {
       response.resume()
-      throw new Error(
-        response.statusCode === 200
-          ? 'Server does not honor byte ranges'
-          : `Server returned HTTP ${response.statusCode}`
-      )
+      throw new Error(`Server returned HTTP ${response.statusCode}`)
     }
 
     await this.consumeSegmentBody(segment, response, absoluteStart)
   }
 
   private consumeSegmentBody(
-    segment: SegmentState,
+    segment: PlannedSegment,
     response: IncomingMessage,
     writePosition: number
   ): Promise<void> {
@@ -251,14 +392,47 @@ export class SegmentedDownloader {
           return
         }
 
+        const live = this.planner?.findByIndex(segment.index)
+        if (!live) {
+          response.destroy()
+          succeed()
+          return
+        }
+
+        // Segment end may have been shrunk by a concurrent split — only keep
+        // bytes that still belong to this segment.
+        const remainingCapacity = live.end - position + 1
+        if (remainingCapacity <= 0) {
+          response.destroy()
+          void this.persistMeta(true)
+            .then(() => succeed())
+            .catch(fail)
+          return
+        }
+
+        const usable =
+          chunk.length > remainingCapacity ? chunk.subarray(0, remainingCapacity) : chunk
+        const reachedBoundary = chunk.length > remainingCapacity
+
         response.pause()
-        void this.enqueueWrite(chunk, position)
+        void this.enqueueWrite(usable, position)
           .then(() => {
-            position += chunk.length
-            segment.downloaded += chunk.length
-            this.downloadedBytes += chunk.length
+            position += usable.length
+            const applied = this.planner?.applyDownloaded(live.index, usable.length) ?? 0
+            this.downloadedBytes += applied
+            this.bytesSinceMeta += applied
+            this.syncSegmentsFromPlanner()
             this.noteProgress()
             void this.persistMetaThrottled()
+
+            if (reachedBoundary || (this.planner && this.planner.isComplete(live))) {
+              response.destroy()
+              void this.persistMeta(true)
+                .then(() => succeed())
+                .catch(fail)
+              return
+            }
+
             response.resume()
           })
           .catch((error) => {
@@ -268,7 +442,7 @@ export class SegmentedDownloader {
       })
 
       response.on('end', () => {
-        void this.persistMeta()
+        void this.persistMeta(true)
           .then(() => succeed())
           .catch(fail)
       })
@@ -276,6 +450,10 @@ export class SegmentedDownloader {
       response.on('error', (error) => {
         if (this.abortReason) {
           fail(new AbortError(this.abortReason))
+          return
+        }
+        // destroy() after a boundary split triggers an error — ignore if settled.
+        if (settled) {
           return
         }
         fail(error)
@@ -291,12 +469,17 @@ export class SegmentedDownloader {
 
   private async downloadSingle(knownTotal: number | null): Promise<void> {
     this.totalBytes = knownTotal
+    this.segments = []
+    this.planner = null
+
     const existing = existsSync(this.options.tempPath)
-      ? (await open(this.options.tempPath, 'r+').then(async (fh) => {
-          const stat = await fh.stat()
-          await fh.close()
-          return stat.size
-        }).catch(() => 0))
+      ? await open(this.options.tempPath, 'r+')
+          .then(async (fh) => {
+            const fileStat = await fh.stat()
+            await fh.close()
+            return fileStat.size
+          })
+          .catch(() => 0)
       : 0
 
     this.downloadedBytes = existing
@@ -306,6 +489,7 @@ export class SegmentedDownloader {
       const headers: Record<string, string> = {}
       if (existing > 0) {
         headers.Range = `bytes=${existing}-`
+        this.applyValidators(headers)
       }
 
       const request = this.request(this.resolvedUrl, { headers }, (response) => {
@@ -350,6 +534,18 @@ export class SegmentedDownloader {
       this.totalBytes = total
     }
 
+    // Prefer positional writes when total size is known so resume state stays consistent.
+    if (this.totalBytes && this.totalBytes > 0) {
+      const writeAt = resumeOk ? this.downloadedBytes : 0
+      if (resumeOk && writeAt > 0 && existsSync(this.options.tempPath)) {
+        this.fileHandle = await open(this.options.tempPath, 'r+')
+      } else {
+        await this.preallocate(this.totalBytes)
+      }
+      await this.consumeSinglePositional(response, writeAt)
+      return
+    }
+
     const flags = resumeOk && this.downloadedBytes > 0 ? 'a' : 'w'
     const stream = createWriteStream(this.options.tempPath, { flags })
 
@@ -376,6 +572,67 @@ export class SegmentedDownloader {
 
       response.on('error', reject)
       stream.on('error', reject)
+    })
+  }
+
+  private consumeSinglePositional(
+    response: IncomingMessage,
+    writePosition: number
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let position = writePosition
+      let settled = false
+
+      const fail = (error: Error): void => {
+        if (settled) {
+          return
+        }
+        settled = true
+        reject(error)
+      }
+
+      const succeed = (): void => {
+        if (settled) {
+          return
+        }
+        settled = true
+        resolve()
+      }
+
+      response.on('data', (chunk: Buffer) => {
+        if (this.abortReason) {
+          response.destroy()
+          fail(new AbortError(this.abortReason))
+          return
+        }
+
+        response.pause()
+        void this.enqueueWrite(chunk, position)
+          .then(() => {
+            position += chunk.length
+            this.downloadedBytes += chunk.length
+            this.noteProgress()
+            response.resume()
+          })
+          .catch((error) => {
+            response.destroy()
+            fail(error instanceof Error ? error : new Error(String(error)))
+          })
+      })
+
+      response.on('end', () => succeed())
+      response.on('error', (error) => {
+        if (this.abortReason) {
+          fail(new AbortError(this.abortReason))
+          return
+        }
+        fail(error)
+      })
+      response.on('close', () => {
+        if (!settled && this.abortReason) {
+          fail(new AbortError(this.abortReason))
+        }
+      })
     })
   }
 
@@ -408,29 +665,53 @@ export class SegmentedDownloader {
     return next
   }
 
-  private async probe(
-    url: string,
-    redirectCount = 0
-  ): Promise<{ url: string; supportsRanges: boolean; totalBytes: number | null }> {
+  private async drainWritesAndSync(): Promise<void> {
+    await this.writeChain.catch(() => undefined)
+    if (this.fileHandle) {
+      await this.fileHandle.sync().catch(() => undefined)
+    }
+  }
+
+  private applyValidators(headers: Record<string, string>): void {
+    if (this.etag && !this.etag.startsWith('W/')) {
+      headers['If-Range'] = this.etag
+    } else if (this.lastModified) {
+      headers['If-Range'] = this.lastModified
+    }
+  }
+
+  private async probe(url: string, redirectCount = 0): Promise<ProbeResult> {
     const head = await this.requestOnce(url, 'HEAD')
     if (isRedirect(head.statusCode) && head.location) {
       if (redirectCount >= 5) {
-        return { url, supportsRanges: false, totalBytes: null }
+        return emptyProbe(url)
       }
       return this.probe(new URL(head.location, url).toString(), redirectCount + 1)
     }
 
     let supportsRanges =
-      typeof head.acceptRanges === 'string' && head.acceptRanges.includes('bytes')
+      typeof head.acceptRanges === 'string' && head.acceptRanges.toLowerCase().includes('bytes')
     let totalBytes = head.totalBytes
     let finalUrl = url
+    let contentDisposition = head.contentDisposition
+    let etag = head.etag
+    let lastModified = head.lastModified
+    let contentMd5 = head.contentMd5
 
     // Many CDNs reject or mishandle HEAD — confirm with a 1-byte range GET.
     if (!supportsRanges || !totalBytes) {
       const range = await this.requestOnce(url, 'GET', { Range: 'bytes=0-0' })
       if (isRedirect(range.statusCode) && range.location) {
         if (redirectCount >= 5) {
-          return { url, supportsRanges: false, totalBytes: totalBytes }
+          return {
+            url,
+            supportsRanges: false,
+            totalBytes,
+            contentDisposition,
+            etag,
+            lastModified,
+            contentMd5
+          }
         }
         return this.probe(new URL(range.location, url).toString(), redirectCount + 1)
       }
@@ -439,12 +720,29 @@ export class SegmentedDownloader {
         supportsRanges = true
         totalBytes = range.totalBytes ?? totalBytes
         finalUrl = url
-      } else if (range.statusCode === 200 && range.totalBytes) {
-        totalBytes = range.totalBytes
+        contentDisposition = range.contentDisposition ?? contentDisposition
+        etag = range.etag ?? etag
+        lastModified = range.lastModified ?? lastModified
+        contentMd5 = range.contentMd5 ?? contentMd5
+      } else if (range.statusCode === 200) {
+        supportsRanges = false
+        totalBytes = range.totalBytes ?? totalBytes
+        contentDisposition = range.contentDisposition ?? contentDisposition
+        etag = range.etag ?? etag
+        lastModified = range.lastModified ?? lastModified
+        contentMd5 = range.contentMd5 ?? contentMd5
       }
     }
 
-    return { url: finalUrl, supportsRanges, totalBytes }
+    return {
+      url: finalUrl,
+      supportsRanges,
+      totalBytes,
+      contentDisposition,
+      etag,
+      lastModified,
+      contentMd5
+    }
   }
 
   private requestOnce(
@@ -456,6 +754,10 @@ export class SegmentedDownloader {
     location?: string
     acceptRanges?: string | string[]
     totalBytes: number | null
+    contentDisposition: string | null
+    etag: string | null
+    lastModified: string | null
+    contentMd5: string | null
   }> {
     return new Promise((resolve) => {
       const request = this.request(url, { method, headers }, (response) => {
@@ -464,12 +766,35 @@ export class SegmentedDownloader {
           statusCode: response.statusCode || 0,
           location: response.headers.location,
           acceptRanges: response.headers['accept-ranges'],
-          totalBytes: totalFromResponse(response, 0)
+          totalBytes: totalFromResponse(response, 0),
+          contentDisposition: headerString(response.headers['content-disposition']),
+          etag: headerString(response.headers.etag),
+          lastModified: headerString(response.headers['last-modified']),
+          contentMd5: headerString(response.headers['content-md5'])
+        })
+      })
+
+      request.setTimeout(REQUEST_TIMEOUT_MS, () => {
+        request.destroy()
+        resolve({
+          statusCode: 0,
+          totalBytes: null,
+          contentDisposition: null,
+          etag: null,
+          lastModified: null,
+          contentMd5: null
         })
       })
 
       request.on('error', () =>
-        resolve({ statusCode: 0, totalBytes: null })
+        resolve({
+          statusCode: 0,
+          totalBytes: null,
+          contentDisposition: null,
+          etag: null,
+          lastModified: null,
+          contentMd5: null
+        })
       )
     })
   }
@@ -490,10 +815,14 @@ export class SegmentedDownloader {
           ...(this.options.requestHeaders || {}),
           ...(options.headers || {})
         },
-        agent: isHttps ? sharedHttpsAgent : sharedHttpAgent
+        agent: isHttps ? sharedHttpsAgent : sharedHttpAgent,
+        timeout: REQUEST_TIMEOUT_MS
       },
       callback
     )
+    request.setTimeout(REQUEST_TIMEOUT_MS, () => {
+      request.destroy(new Error('Request timed out'))
+    })
     request.end()
     return request
   }
@@ -533,12 +862,11 @@ export class SegmentedDownloader {
   }
 
   private emitProgress(force: boolean): void {
-    if (!force) {
-      // noteProgress already gated by interval
-    }
-
+    void force
     const total = this.totalBytes
-    const percent = total ? Math.min(100, Math.round((this.downloadedBytes / total) * 1000) / 10) : 0
+    const percent = total
+      ? Math.min(100, Math.round((this.downloadedBytes / total) * 1000) / 10)
+      : 0
 
     this.options.onProgress({
       id: this.options.id,
@@ -546,8 +874,15 @@ export class SegmentedDownloader {
       totalBytes: total,
       speedBytesPerSecond: this.speedBytesPerSecond,
       percent,
-      segments: this.segments.length > 0 ? this.segments.map((segment) => ({ ...segment })) : undefined
+      segments:
+        this.segments.length > 0 ? this.segments.map((segment) => ({ ...segment })) : undefined
     })
+  }
+
+  private syncSegmentsFromPlanner(): void {
+    if (this.planner) {
+      this.segments = this.planner.snapshot()
+    }
   }
 
   private async loadMeta(expectedTotal: number): Promise<boolean> {
@@ -560,54 +895,88 @@ export class SegmentedDownloader {
       const meta = JSON.parse(raw) as MetaFile
       if (
         !meta ||
+        meta.version !== META_VERSION ||
         (meta.url !== this.resolvedUrl && meta.url !== this.options.url) ||
         meta.totalBytes !== expectedTotal ||
         !Array.isArray(meta.segments) ||
-        meta.segments.length === 0
+        meta.segments.length === 0 ||
+        meta.mode !== 'segmented'
       ) {
         return false
       }
 
-      this.segments = meta.segments.map((segment) => ({ ...segment }))
+      // Resource identity changed — restart from scratch.
+      if (!validatorsMatch(meta, this.etag, this.lastModified)) {
+        await this.resetPartFiles()
+        return false
+      }
+
+      this.planner = DynamicSegmentPlanner.fromExisting(
+        expectedTotal,
+        meta.segments,
+        meta.minSegmentSizeBytes || this.options.minSegmentSizeBytes
+      )
+
+      if (!this.planner.coversFullFile()) {
+        this.planner = null
+        return false
+      }
+
       this.resolvedUrl = meta.url
+      this.etag = meta.etag ?? this.etag
+      this.lastModified = meta.lastModified ?? this.lastModified
+      this.contentMd5 = meta.contentMd5 ?? this.contentMd5
+      this.contentDisposition = meta.contentDisposition ?? this.contentDisposition
       return true
     } catch {
       return false
     }
   }
 
-  private metaWriteQueued = false
-  private lastMetaWrite = 0
-
   private async persistMetaThrottled(): Promise<void> {
     if (this.metaWriteQueued) {
       return
     }
 
-    const delay = Math.max(0, 400 - (Date.now() - this.lastMetaWrite))
+    const dueByBytes = this.bytesSinceMeta >= META_BYTE_INTERVAL
+    const delay = dueByBytes ? 0 : Math.max(0, META_INTERVAL_MS - (Date.now() - this.lastMetaWrite))
     this.metaWriteQueued = true
     await sleep(delay)
     this.metaWriteQueued = false
     if (!this.abortReason) {
-      await this.persistMeta()
+      await this.persistMeta(false)
     }
   }
 
-  private async persistMeta(): Promise<void> {
-    if (!this.totalBytes || this.segments.length === 0) {
+  private async persistMeta(forceSync: boolean): Promise<void> {
+    if (!this.totalBytes || !this.planner || this.segments.length === 0) {
       return
     }
 
     const run = async (): Promise<void> => {
+      if (forceSync) {
+        await this.drainWritesAndSync()
+      }
+
       const payload: MetaFile = {
+        version: META_VERSION,
         url: this.resolvedUrl,
         totalBytes: this.totalBytes!,
         connections: this.options.connections,
-        segments: this.segments.map((segment) => ({ ...segment }))
+        minSegmentSizeBytes: this.options.minSegmentSizeBytes,
+        segments: this.planner!.snapshot(),
+        etag: this.etag,
+        lastModified: this.lastModified,
+        contentMd5: this.contentMd5,
+        contentDisposition: this.contentDisposition,
+        mode: 'segmented'
       }
 
-      await writeFile(this.options.metaPath, JSON.stringify(payload))
+      const tempMeta = `${this.options.metaPath}.tmp`
+      await writeFile(tempMeta, JSON.stringify(payload))
+      await rename(tempMeta, this.options.metaPath)
       this.lastMetaWrite = Date.now()
+      this.bytesSinceMeta = 0
     }
 
     const next = this.metaChain.then(run, run)
@@ -618,12 +987,41 @@ export class SegmentedDownloader {
     return next
   }
 
+  private async validateCompletedFile(): Promise<void> {
+    if (!existsSync(this.options.tempPath)) {
+      throw new Error('Temporary download file is missing')
+    }
+
+    const fileStat = await stat(this.options.tempPath)
+    if (this.totalBytes != null && fileStat.size !== this.totalBytes) {
+      throw new Error(
+        `File size mismatch: expected ${this.totalBytes} bytes, got ${fileStat.size}`
+      )
+    }
+
+    if (this.contentMd5) {
+      const digest = await md5File(this.options.tempPath)
+      const expected = normalizeMd5(this.contentMd5)
+      if (expected && digest !== expected) {
+        throw new Error('Content-MD5 checksum mismatch')
+      }
+    }
+  }
+
+  private async resetPartFiles(): Promise<void> {
+    await this.closeFileHandle().catch(() => undefined)
+    await removeQuiet(this.options.tempPath)
+    await removeQuiet(this.options.metaPath)
+    this.segments = []
+    this.planner = null
+    this.downloadedBytes = 0
+  }
+
   private async closeFileHandle(): Promise<void> {
     if (!this.fileHandle) {
       return
     }
 
-    // Drain pending writes first.
     await this.writeChain.catch(() => undefined)
     await this.fileHandle.close()
     this.fileHandle = null
@@ -650,24 +1048,48 @@ export function isAbortError(error: unknown): error is AbortError {
   return error instanceof AbortError || (error instanceof Error && error.name === 'AbortError')
 }
 
-function buildSegments(totalBytes: number, connections: number): SegmentState[] {
-  const maxBySize = Math.max(1, Math.floor(totalBytes / MIN_SEGMENT_BYTES))
-  const count = Math.min(connections, maxBySize, 16)
-  const segmentSize = Math.ceil(totalBytes / count)
-
-  return Array.from({ length: count }, (_, index) => {
-    const start = index * segmentSize
-    const end = Math.min(totalBytes - 1, start + segmentSize - 1)
-    return { index, start, end, downloaded: 0 }
-  })
+function emptyProbe(url: string): ProbeResult {
+  return {
+    url,
+    supportsRanges: false,
+    totalBytes: null,
+    contentDisposition: null,
+    etag: null,
+    lastModified: null,
+    contentMd5: null
+  }
 }
 
-function segmentLength(segment: SegmentState): number {
-  return segment.end - segment.start + 1
+function validatorsMatch(
+  meta: Pick<MetaFile, 'etag' | 'lastModified'>,
+  etag: string | null,
+  lastModified: string | null
+): boolean {
+  if (meta.etag && etag) {
+    return meta.etag === etag
+  }
+  if (meta.lastModified && lastModified) {
+    return meta.lastModified === lastModified
+  }
+  // No validators available on either side — allow resume by size/url alone.
+  return true
+}
+
+function headerString(value: string | string[] | undefined): string | null {
+  if (Array.isArray(value)) {
+    return value[0] ?? null
+  }
+  return typeof value === 'string' ? value : null
 }
 
 function isRedirect(statusCode: number | undefined): boolean {
-  return statusCode === 301 || statusCode === 302 || statusCode === 303 || statusCode === 307 || statusCode === 308
+  return (
+    statusCode === 301 ||
+    statusCode === 302 ||
+    statusCode === 303 ||
+    statusCode === 307 ||
+    statusCode === 308
+  )
 }
 
 function totalFromResponse(response: IncomingMessage, offset: number): number | null {
@@ -687,6 +1109,32 @@ function totalFromResponse(response: IncomingMessage, offset: number): number | 
   return null
 }
 
+function normalizeMd5(value: string): string | null {
+  const trimmed = value.trim().replace(/^"|"$/g, '')
+  // Base64 Content-MD5 → hex
+  if (/^[A-Za-z0-9+/]+=*$/.test(trimmed) && trimmed.length !== 32) {
+    try {
+      return Buffer.from(trimmed, 'base64').toString('hex')
+    } catch {
+      return null
+    }
+  }
+  if (/^[a-fA-F0-9]{32}$/.test(trimmed)) {
+    return trimmed.toLowerCase()
+  }
+  return null
+}
+
+async function md5File(path: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash('md5')
+    const stream = createReadStream(path)
+    stream.on('data', (chunk) => hash.update(chunk))
+    stream.on('error', reject)
+    stream.on('end', () => resolve(hash.digest('hex')))
+  })
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -698,3 +1146,6 @@ async function removeQuiet(path: string): Promise<void> {
     // ignore
   }
 }
+
+// Re-export for tests that inspect segment math alongside the downloader.
+export { segmentLength }

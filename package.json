@@ -9,6 +9,8 @@
     "dev": "electron-vite dev",
     "build": "tsc --noEmit && electron-vite build",
     "preview": "electron-vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "dist": "npm run build:extension && npm run build && electron-builder",
     "build:extension": "npm --prefix extension run build",
     "build:extension:chrome": "npm --prefix extension run build:chrome",
@@ -32,7 +34,8 @@
     "electron-builder": "latest",
     "electron-vite": "^5.0.0",
     "typescript": "latest",
-    "vite": "^7.3.6"
+    "vite": "^7.3.6",
+    "vitest": "^3.2.4"
   },
   "build": {
     "appId": "com.arus.app",
