@@ -1,7 +1,5 @@
 node_modules
-out
 dist
-release
 extension/node_modules
 extension/dist
 extension/artifacts
@@ -10,11 +8,10 @@ extension/artifacts
 *.local
 .DS_Store
 .dart_tool/
+.flutter-plugins
 .flutter-plugins-dependencies
 .pub/
 .pub-cache/
 coverage/
 flutter_build/
 /build/*
-!/build/icon.png
-/build/windows/

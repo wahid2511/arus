@@ -36,6 +36,13 @@ class DownloadManager extends ChangeNotifier {
         task.status = DownloadStatus.paused;
         task.speedBytesPerSecond = 0;
       }
+      if (task.status == DownloadStatus.completed) {
+        // A previous process may have finished the rename but been unable to
+        // remove a checkpoint. Completed tasks must never keep stale .part
+        // or .part.meta.json files around.
+        await _deletePartFiles(task);
+        task.segments = null;
+      }
       task.segments = task.segments?.map((segment) => segment..active = false).toList();
     }
     _ready = true;
@@ -293,13 +300,20 @@ class DownloadManager extends ChangeNotifier {
 
   Future<void> _deletePartFiles(DownloadTask task) async {
     for (final path in <String>[task.tempPath, task.metaPath, '${task.metaPath}.tmp']) {
-      try {
-        final file = File(path);
-        if (await file.exists()) {
-          await file.delete();
+      final file = File(path);
+      for (var attempt = 0; attempt < 5; attempt += 1) {
+        if (!await file.exists()) {
+          break;
         }
-      } catch (_) {
-        // Ignore cleanup failures; a future resume can still recover the file.
+        try {
+          await file.delete();
+          if (!await file.exists()) {
+            break;
+          }
+        } catch (_) {
+          // Windows can briefly keep a just-closed checkpoint locked.
+        }
+        await Future<void>.delayed(Duration(milliseconds: 25 * (attempt + 1)));
       }
     }
   }

@@ -379,7 +379,16 @@ class _Sidebar extends StatelessWidget {
               borderRadius: BorderRadius.circular(13),
               border: Border.all(color: _primary.withValues(alpha: 0.38)),
             ),
-            child: const Icon(Icons.bolt_rounded, color: _primary, size: 24),
+            clipBehavior: Clip.antiAlias,
+            child: Image.asset(
+              'assets/arus_logo.png',
+              fit: BoxFit.cover,
+              errorBuilder: (context, error, stackTrace) => const Icon(
+                Icons.bolt_rounded,
+                color: _primary,
+                size: 24,
+              ),
+            ),
           ),
           const SizedBox(height: 28),
           _NavButton(

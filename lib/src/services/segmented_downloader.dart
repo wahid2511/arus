@@ -389,7 +389,8 @@ class SegmentedDownloader {
     }
     try {
       final decoded = jsonDecode(await metaFile.readAsString());
-      if (decoded is! Map || decoded['version'] != 1 || decoded['mode'] != 'segmented') {
+      final version = decoded is Map ? decoded['version'] : null;
+      if (decoded is! Map || (version != 1 && version != 2) || decoded['mode'] != 'segmented') {
         return false;
       }
       if (decoded['totalBytes'] != totalBytes || decoded['url'] != _resolvedUrl) {
@@ -505,14 +506,7 @@ class SegmentedDownloader {
   Future<void> _resetPartFiles() async {
     await _closeFile();
     for (final path in <String>[tempPath, metaPath, '$metaPath.tmp']) {
-      try {
-        final file = File(path);
-        if (await file.exists()) {
-          await file.delete();
-        }
-      } catch (_) {
-        // A later retry will report the real filesystem error if it persists.
-      }
+      await _deleteFileWithRetry(path);
     }
     _segments = <DownloadSegment>[];
     _downloadedBytes = 0;
@@ -538,16 +532,12 @@ class SegmentedDownloader {
     if (await target.exists()) {
       throw StateError('Destination file already exists: $filePath');
     }
+    // The .part file is the assembled output: parallel workers write each
+    // byte range at its absolute offset, then this rename exposes the
+    // complete original file atomically.
     await File(tempPath).rename(filePath);
     for (final path in <String>[metaPath, '$metaPath.tmp']) {
-      try {
-        final file = File(path);
-        if (await file.exists()) {
-          await file.delete();
-        }
-      } catch (_) {
-        // Completion is already safe; stale checkpoints can be removed later.
-      }
+      await _deleteFileWithRetry(path);
     }
   }
 
@@ -675,3 +665,22 @@ bool _isRetryable(Object error) {
 }
 
 Duration _retryDelay(int attempt) => Duration(milliseconds: math.min(8000, 300 * math.pow(2, attempt - 1).toInt()));
+
+Future<void> _deleteFileWithRetry(String path) async {
+  final file = File(path);
+  for (var attempt = 0; attempt < 5; attempt += 1) {
+    if (!await file.exists()) {
+      return;
+    }
+    try {
+      await file.delete();
+      if (!await file.exists()) {
+        return;
+      }
+    } catch (_) {
+      // Windows can briefly keep a just-closed file locked. Retry before
+      // giving completion back to the queue.
+    }
+    await Future<void>.delayed(Duration(milliseconds: 25 * (attempt + 1)));
+  }
+}

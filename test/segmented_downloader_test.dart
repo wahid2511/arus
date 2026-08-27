@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -30,6 +31,54 @@ void main() {
       expect(await File(target).readAsBytes(), bytes);
       expect(await File(target).exists(), isTrue);
       expect(await File('$target.part').exists(), isFalse);
+      expect(await File('$target.part.meta.json').exists(), isFalse);
+    } finally {
+      await server.close(force: true);
+      await root.delete(recursive: true);
+    }
+  });
+
+  test('resumes a previous segmented checkpoint and removes it after assembly', () async {
+    final bytes = List<int>.generate(96 * 1024, (index) => (index * 13) % 239);
+    final server = await _serve(bytes, supportsRanges: true);
+    final root = await Directory.systemTemp.createTemp('arus-resume-test-');
+    final target = joinPath(root.path, 'resume.bin');
+    final half = bytes.length ~/ 2;
+    final part = List<int>.filled(bytes.length, 0);
+    part.setRange(0, half, bytes, 0);
+
+    try {
+      await File('$target.part').create(recursive: true);
+      await File('$target.part').writeAsBytes(part);
+      await File('$target.part.meta.json').writeAsString(
+        jsonEncode(<String, dynamic>{
+          'version': 2,
+          'mode': 'segmented',
+          'url': 'http://127.0.0.1:${server.port}/resume.bin',
+          'totalBytes': bytes.length,
+          'segments': <Map<String, int>>[
+            <String, int>{'index': 0, 'start': 0, 'end': half - 1, 'downloaded': half},
+            <String, int>{'index': 1, 'start': half, 'end': bytes.length - 1, 'downloaded': 0},
+          ],
+        }),
+      );
+
+      final downloader = SegmentedDownloader(
+        id: 'test-resume',
+        url: 'http://127.0.0.1:${server.port}/resume.bin',
+        filePath: target,
+        tempPath: '$target.part',
+        metaPath: '$target.part.meta.json',
+        connections: 4,
+        minSegmentSizeBytes: half,
+        maxRetries: 2,
+        onProgress: (_) {},
+      );
+
+      await downloader.start();
+
+      expect(await File(target).readAsBytes(), bytes);
+      expect(await File('$target.part.meta.json').exists(), isFalse);
     } finally {
       await server.close(force: true);
       await root.delete(recursive: true);
@@ -58,6 +107,38 @@ void main() {
       await downloader.start();
 
       expect(await File(target).readAsBytes(), bytes);
+      expect(await File('$target.part').exists(), isFalse);
+      expect(await File('$target.part.meta.json').exists(), isFalse);
+    } finally {
+      await server.close(force: true);
+      await root.delete(recursive: true);
+    }
+  });
+
+  test('rebuilds successfully when Range support disappears after the probe', () async {
+    final bytes = List<int>.generate(128 * 1024, (index) => (index * 23) % 241);
+    final server = await _serveRangeLoss(bytes);
+    final root = await Directory.systemTemp.createTemp('arus-range-loss-test-');
+    final target = joinPath(root.path, 'range-loss.bin');
+
+    try {
+      final downloader = SegmentedDownloader(
+        id: 'test-range-loss',
+        url: 'http://127.0.0.1:${server.port}/range-loss.bin',
+        filePath: target,
+        tempPath: '$target.part',
+        metaPath: '$target.part.meta.json',
+        connections: 4,
+        minSegmentSizeBytes: 8 * 1024,
+        maxRetries: 2,
+        onProgress: (_) {},
+      );
+
+      await downloader.start();
+
+      expect(await File(target).readAsBytes(), bytes);
+      expect(await File('$target.part').exists(), isFalse);
+      expect(await File('$target.part.meta.json').exists(), isFalse);
     } finally {
       await server.close(force: true);
       await root.delete(recursive: true);
@@ -86,6 +167,8 @@ void main() {
       await downloader.start();
 
       expect(await File(target).readAsBytes(), bytes);
+      expect(await File('$target.part').exists(), isFalse);
+      expect(await File('$target.part.meta.json').exists(), isFalse);
     } finally {
       await server.close(force: true);
       await root.delete(recursive: true);
@@ -166,6 +249,46 @@ Future<HttpServer> _serveWithDrop(List<int> bytes) async {
       response.contentLength = bytes.length;
       response.add(bytes);
     }
+    await response.close();
+  });
+  return server;
+}
+
+Future<HttpServer> _serveRangeLoss(List<int> bytes) async {
+  final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+  var probeSeen = false;
+  server.listen((request) async {
+    final response = request.response;
+    response.headers.set(HttpHeaders.etagHeader, '"arus-range-loss"');
+
+    if (request.method == 'HEAD') {
+      response.statusCode = HttpStatus.ok;
+      response.contentLength = bytes.length;
+      await response.close();
+      return;
+    }
+
+    final range = request.headers.value(HttpHeaders.rangeHeader);
+    if (range == 'bytes=0-0' && !probeSeen) {
+      probeSeen = true;
+      response.statusCode = HttpStatus.partialContent;
+      response.headers.set(HttpHeaders.contentRangeHeader, 'bytes 0-0/${bytes.length}');
+      response.contentLength = 1;
+      response.add(<int>[bytes.first]);
+      await response.close();
+      return;
+    }
+
+    if (range != null) {
+      response.statusCode = HttpStatus.forbidden;
+      response.contentLength = 0;
+      await response.close();
+      return;
+    }
+
+    response.statusCode = HttpStatus.ok;
+    response.contentLength = bytes.length;
+    response.add(bytes);
     await response.close();
   });
   return server;
