@@ -1,6 +1,6 @@
 # Arus
 
-**Arus** adalah download manager desktop untuk Windows, macOS, dan Linux — dibangun dengan **Electron + React + TypeScript**. Aplikasi ini menangani unduhan HTTP/HTTPS dengan **koneksi paralel (segmented download)**, antrean, jeda/lanjut, dan integrasi browser lewat **Native Messaging** (cara standar browser berkomunikasi dengan aplikasi desktop, seperti IDM atau Free Download Manager).
+**Arus** adalah download manager desktop bergaya IDM. Proyek ini sekarang memiliki jalur aplikasi utama **Flutter Desktop** di `lib/`, sementara implementasi Electron + React + TypeScript lama tetap disimpan selama migrasi integrasi browser berlangsung. Keduanya menangani unduhan HTTP/HTTPS dengan **koneksi paralel (segmented download)**, antrean, jeda/lanjut, dan pemulihan file `.part`.
 
 Antarmuka menggunakan desain gelap datar (flat dark) dengan aksen amber dan teal.
 
@@ -9,6 +9,7 @@ Antarmuka menggunakan desain gelap datar (flat dark) dengan aksen amber dan teal
 ## Daftar isi
 
 - [Fitur utama](#fitur-utama)
+- [Migrasi Flutter](#migrasi-flutter)
 - [Arsitektur](#arsitektur)
 - [Tech stack](#tech-stack)
 - [Struktur proyek](#struktur-proyek)
@@ -49,6 +50,26 @@ Antarmuka menggunakan desain gelap datar (flat dark) dengan aksen amber dan teal
 | **Popup** | Status koneksi, toggle intercept, ambang ukuran minimum (MB) |
 | **Cookie & header** | Cookie, Referer, dan User-Agent dikirim ke Arus untuk unduhan terautentikasi |
 | **Fallback aman** | Jika Arus tidak berjalan, unduhan browser **tetap berjalan** — tidak pernah di-drop diam-diam |
+
+## Migrasi Flutter
+
+Flutter Desktop sudah menjadi jalur UI dan mesin unduhan baru. Port ini mencakup:
+
+- dashboard gelap bergaya IDM dengan filter, statistik kecepatan, detail segmen, dan aksi bulk;
+- antrean, batas unduhan bersamaan, jeda/lanjut/stop, retry koneksi, dan resume metadata;
+- pembuatan folder tujuan otomatis sebelum probe, retry, dan finalisasi sehingga error `ENOENT` pada folder Downloads tidak terjadi lagi;
+- settings lokal tanpa dependency eksternal, sehingga dapat berjalan di Windows, macOS, dan Linux.
+
+Perintah pengembangan Flutter:
+
+```powershell
+flutter pub get
+flutter test
+flutter run -d windows
+flutter build windows --release
+```
+
+Build Windows memerlukan Visual Studio dengan workload **Desktop development with C++**. Folder `extension/` dan `extension-legacy-http/` tetap dipertahankan sebagai adapter browser lama; Native Messaging belum dipanggil langsung dari Dart pada tahap port ini.
 
 ---
 
@@ -105,13 +126,13 @@ Native host berjalan sebagai proses Node ringan (`ELECTRON_RUN_AS_NODE`) — **b
 
 | Lapisan | Teknologi |
 |---------|-----------|
-| Desktop shell | Electron 37 |
-| UI | React 19, Framer Motion |
-| Build desktop | electron-vite, Vite, TypeScript |
-| Mesin unduhan | Node.js `http`/`https`, keep-alive agents |
+| Desktop shell utama | Flutter 3.44.8, Dart 3.12 |
+| UI utama | Flutter Material 3 |
+| Mesin unduhan utama | Dart `dart:io`, `HttpClient`, positional file writes |
+| Jalur transisi | Electron 37, React 19, TypeScript |
 | Ekstensi | Manifest V3, TypeScript, `webextension-polyfill` |
+| Build desktop Flutter | CMake + Visual Studio Desktop C++ (Windows) |
 | Build ekstensi | Vite (esbuild), `web-ext` (paket Firefox) |
-| Packaging desktop | electron-builder (NSIS di Windows, DMG/ZIP di macOS) |
 
 ---
 
@@ -119,8 +140,15 @@ Native host berjalan sebagai proses Node ringan (`ELECTRON_RUN_AS_NODE`) — **b
 
 ```
 arus/
+├── lib/                    # Aplikasi Flutter utama
+│   ├── main.dart           # Dashboard dan settings Material 3
+│   └── src/
+│       ├── models/         # Task, segment, settings, progress
+│       ├── services/       # Queue, persistence, segmented downloader
+│       └── core/           # Path dan format utilities
+├── windows/                # Runner Flutter Desktop Windows
 ├── src/
-│   ├── main/                 # Proses utama Electron
+│   ├── main/                 # Jalur Electron transisi
 │   │   ├── main.ts           # Window, IPC, lifecycle
 │   │   ├── downloadManager.ts
 │   │   ├── segmentedDownloader.ts
@@ -147,9 +175,10 @@ arus/
 
 ## Persyaratan
 
-- **Node.js** 20+ (disarankan LTS)
-- **npm** 10+
-- Untuk build installer: toolchain OS masing-masing (NSIS di Windows; Xcode Command Line Tools di macOS untuk code signing opsional)
+- **Flutter** 3.44+ dan **Dart** 3.12+
+- **Visual Studio** dengan workload **Desktop development with C++** untuk build Windows
+- **Node.js** 20+ dan **npm** 10+ hanya untuk jalur Electron/ekstensi transisi
+- Untuk build installer Electron lama: toolchain OS masing-masing (NSIS di Windows; Xcode Command Line Tools di macOS untuk code signing opsional)
 - Browser: Chrome 88+, Edge, Brave, atau Firefox 128+ (MV3)
 
 ### Catatan platform

@@ -9,3 +9,12 @@ extension/artifacts
 *.log
 *.local
 .DS_Store
+.dart_tool/
+.flutter-plugins-dependencies
+.pub/
+.pub-cache/
+coverage/
+flutter_build/
+/build/*
+!/build/icon.png
+/build/windows/
