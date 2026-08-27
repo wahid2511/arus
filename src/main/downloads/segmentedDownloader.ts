@@ -5,9 +5,10 @@ import { Agent as HttpAgent } from 'node:http'
 import { Agent as HttpsAgent } from 'node:https'
 import { createHash } from 'node:crypto'
 import { createWriteStream } from 'node:fs'
-import { open, readFile, rename, unlink, writeFile, stat } from 'node:fs/promises'
+import { mkdir, open, readFile, rename, unlink, writeFile, stat } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
 import { createReadStream, existsSync } from 'node:fs'
+import { dirname } from 'node:path'
 import type { DownloadProgressEvent, DownloadSegment } from '../../shared/downloadTypes'
 import {
   clampConnections,
@@ -72,6 +73,9 @@ const DEFAULT_MAX_RETRIES = 3
 const DEFAULT_MIN_SEGMENT_BYTES = 512 * 1024
 const REQUEST_TIMEOUT_MS = 30_000
 const META_VERSION = 2 as const
+/** Browser-like UA — many file hosts (hotlink / anti-leech) reject Node's default. */
+const DEFAULT_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 
 const sharedHttpAgent = new HttpAgent({ keepAlive: true, maxSockets: 32, maxFreeSockets: 16 })
 const sharedHttpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 32, maxFreeSockets: 16 })
@@ -120,6 +124,8 @@ export class SegmentedDownloader {
   private metaWriteQueued = false
   private lastMetaWrite = 0
   private rangeFallbackRequested = false
+  /** Set before rename/cleanup so in-flight meta writers cannot recreate the checkpoint. */
+  private finalized = false
 
   constructor(options: SegmentedDownloaderOptions) {
     this.options = {
@@ -138,12 +144,18 @@ export class SegmentedDownloader {
 
   async start(): Promise<void> {
     this.abortReason = null
+    this.finalized = false
     this.lastProgressAt = Date.now()
     this.lastProgressBytes = 0
     this.speedBytesPerSecond = 0
     this.rangeFallbackRequested = false
 
     try {
+      // A queued task can outlive its destination folder (for example after a
+      // user moves or deletes Downloads). Create it again before opening the
+      // .part file or writing the resume checkpoint.
+      await this.ensureParentDirectories()
+
       const probe = await this.probe(this.resolvedUrl)
       this.resolvedUrl = probe.url
       this.etag = probe.etag
@@ -158,24 +170,23 @@ export class SegmentedDownloader {
           if (isRangeSupportLostError(error) || this.rangeFallbackRequested) {
             await this.closeFileHandle().catch(() => undefined)
             await this.resetPartFiles()
-            await this.downloadSingle(probe.totalBytes)
+            await this.downloadSingleWithRetry(probe.totalBytes)
           } else {
             throw error
           }
         }
       } else {
-        await this.downloadSingle(probe.totalBytes)
+        await this.downloadSingleWithRetry(probe.totalBytes)
       }
 
       this.throwIfAborted()
       await this.closeFileHandle()
       await this.validateCompletedFile()
-      await rename(this.options.tempPath, this.options.filePath)
-      await removeQuiet(this.options.metaPath)
+      await this.finalizeCompletedDownload()
       this.emitProgress(true)
     } catch (error) {
       await this.closeFileHandle().catch(() => undefined)
-      if (this.abortReason === 'paused') {
+      if (this.abortReason === 'paused' && !this.finalized) {
         await this.persistMeta(true).catch(() => undefined)
       }
       throw error
@@ -352,6 +363,12 @@ export class SegmentedDownloader {
       throw new RangeSupportLostError()
     }
 
+    // Anti-leech CDNs often advertise Accept-Ranges then forbid Range GETs with 403/401.
+    if (response.statusCode === 401 || response.statusCode === 403) {
+      response.resume()
+      throw new RangeSupportLostError(`Server rejected ranged request (HTTP ${response.statusCode})`)
+    }
+
     if (response.statusCode !== 206) {
       response.resume()
       throw new Error(`Server returned HTTP ${response.statusCode}`)
@@ -472,7 +489,7 @@ export class SegmentedDownloader {
     this.segments = []
     this.planner = null
 
-    const existing = existsSync(this.options.tempPath)
+    let existing = existsSync(this.options.tempPath)
       ? await open(this.options.tempPath, 'r+')
           .then(async (fh) => {
             const fileStat = await fh.stat()
@@ -481,6 +498,15 @@ export class SegmentedDownloader {
           })
           .catch(() => 0)
       : 0
+
+    // A stale or preallocated checkpoint must not produce an unsatisfiable
+    // Range request. A full-size .part is not enough to prove completion:
+    // segmented downloads preallocate the file with zeroes.
+    if (this.totalBytes && existing >= this.totalBytes) {
+      await removeQuiet(this.options.tempPath)
+      await removeQuiet(this.options.metaPath)
+      existing = 0
+    }
 
     this.downloadedBytes = existing
     this.emitProgress(true)
@@ -550,10 +576,30 @@ export class SegmentedDownloader {
     const stream = createWriteStream(this.options.tempPath, { flags })
 
     await new Promise<void>((resolve, reject) => {
+      let settled = false
+      let responseEnded = false
+
+      const fail = (error: Error): void => {
+        if (settled) {
+          return
+        }
+        settled = true
+        stream.destroy()
+        reject(error)
+      }
+
+      const succeed = (): void => {
+        if (settled) {
+          return
+        }
+        settled = true
+        resolve()
+      }
+
       response.on('data', (chunk: Buffer) => {
         if (this.abortReason) {
           response.destroy()
-          stream.destroy()
+          fail(new AbortError(this.abortReason))
           return
         }
 
@@ -567,11 +613,34 @@ export class SegmentedDownloader {
       })
 
       response.on('end', () => {
-        stream.end(() => resolve())
+        responseEnded = true
+        if (this.abortReason) {
+          fail(new AbortError(this.abortReason))
+          return
+        }
+        stream.end(() => succeed())
       })
 
-      response.on('error', reject)
-      stream.on('error', reject)
+      response.on('aborted', () => {
+        fail(
+          this.abortReason
+            ? new AbortError(this.abortReason)
+            : new Error('Connection closed before the download completed')
+        )
+      })
+      response.on('error', (error) => {
+        fail(this.abortReason ? new AbortError(this.abortReason) : error)
+      })
+      response.on('close', () => {
+        if (!responseEnded) {
+          fail(
+            this.abortReason
+              ? new AbortError(this.abortReason)
+              : new Error('Connection closed before the download completed')
+          )
+        }
+      })
+      stream.on('error', (error) => fail(error))
     })
   }
 
@@ -582,6 +651,7 @@ export class SegmentedDownloader {
     return new Promise((resolve, reject) => {
       let position = writePosition
       let settled = false
+      let responseEnded = false
 
       const fail = (error: Error): void => {
         if (settled) {
@@ -620,7 +690,17 @@ export class SegmentedDownloader {
           })
       })
 
-      response.on('end', () => succeed())
+      response.on('end', () => {
+        responseEnded = true
+        succeed()
+      })
+      response.on('aborted', () => {
+        fail(
+          this.abortReason
+            ? new AbortError(this.abortReason)
+            : new Error('Connection closed before the download completed')
+        )
+      })
       response.on('error', (error) => {
         if (this.abortReason) {
           fail(new AbortError(this.abortReason))
@@ -629,8 +709,12 @@ export class SegmentedDownloader {
         fail(error)
       })
       response.on('close', () => {
-        if (!settled && this.abortReason) {
-          fail(new AbortError(this.abortReason))
+        if (!settled && !responseEnded) {
+          fail(
+            this.abortReason
+              ? new AbortError(this.abortReason)
+              : new Error('Connection closed before the download completed')
+          )
         }
       })
     })
@@ -647,6 +731,36 @@ export class SegmentedDownloader {
       await handle.write(marker, 0, 1, totalBytes - 1)
     }
     this.fileHandle = handle
+  }
+
+  private async downloadSingleWithRetry(knownTotal: number | null): Promise<void> {
+    let attempt = 0
+
+    while (true) {
+      this.throwIfAborted()
+
+      try {
+        // A failed positional stream may have queued writes and an open
+        // handle. Drain and close it before the next IDM-style resume attempt.
+        await this.closeFileHandle()
+        await this.downloadSingle(knownTotal)
+        return
+      } catch (error) {
+        await this.closeFileHandle().catch(() => undefined)
+
+        if (
+          this.abortReason ||
+          !isRetryableDownloadError(error) ||
+          attempt >= this.options.maxRetries
+        ) {
+          throw error
+        }
+
+        attempt += 1
+        await this.ensureParentDirectories()
+        await sleep(Math.min(8_000, 300 * 2 ** (attempt - 1)))
+      }
+    }
   }
 
   private enqueueWrite(chunk: Buffer, position: number): Promise<void> {
@@ -672,6 +786,15 @@ export class SegmentedDownloader {
     }
   }
 
+  private async ensureParentDirectories(): Promise<void> {
+    const directories = new Set([
+      dirname(this.options.filePath),
+      dirname(this.options.tempPath),
+      dirname(this.options.metaPath)
+    ])
+    await Promise.all([...directories].map((directory) => mkdir(directory, { recursive: true })))
+  }
+
   private applyValidators(headers: Record<string, string>): void {
     if (this.etag && !this.etag.startsWith('W/')) {
       headers['If-Range'] = this.etag
@@ -689,8 +812,9 @@ export class SegmentedDownloader {
       return this.probe(new URL(head.location, url).toString(), redirectCount + 1)
     }
 
-    let supportsRanges =
-      typeof head.acceptRanges === 'string' && head.acceptRanges.toLowerCase().includes('bytes')
+    // Never trust HEAD Accept-Ranges alone — anti-leech hosts often advertise
+    // ranges then reject Range GETs with 403. Segmentation requires a real 206.
+    let supportsRanges = false
     let totalBytes = head.totalBytes
     let finalUrl = url
     let contentDisposition = head.contentDisposition
@@ -698,41 +822,39 @@ export class SegmentedDownloader {
     let lastModified = head.lastModified
     let contentMd5 = head.contentMd5
 
-    // Many CDNs reject or mishandle HEAD — confirm with a 1-byte range GET.
-    if (!supportsRanges || !totalBytes) {
-      const range = await this.requestOnce(url, 'GET', { Range: 'bytes=0-0' })
-      if (isRedirect(range.statusCode) && range.location) {
-        if (redirectCount >= 5) {
-          return {
-            url,
-            supportsRanges: false,
-            totalBytes,
-            contentDisposition,
-            etag,
-            lastModified,
-            contentMd5
-          }
+    const range = await this.requestOnce(url, 'GET', { Range: 'bytes=0-0' })
+    if (isRedirect(range.statusCode) && range.location) {
+      if (redirectCount >= 5) {
+        return {
+          url,
+          supportsRanges: false,
+          totalBytes,
+          contentDisposition,
+          etag,
+          lastModified,
+          contentMd5
         }
-        return this.probe(new URL(range.location, url).toString(), redirectCount + 1)
       }
-
-      if (range.statusCode === 206) {
-        supportsRanges = true
-        totalBytes = range.totalBytes ?? totalBytes
-        finalUrl = url
-        contentDisposition = range.contentDisposition ?? contentDisposition
-        etag = range.etag ?? etag
-        lastModified = range.lastModified ?? lastModified
-        contentMd5 = range.contentMd5 ?? contentMd5
-      } else if (range.statusCode === 200) {
-        supportsRanges = false
-        totalBytes = range.totalBytes ?? totalBytes
-        contentDisposition = range.contentDisposition ?? contentDisposition
-        etag = range.etag ?? etag
-        lastModified = range.lastModified ?? lastModified
-        contentMd5 = range.contentMd5 ?? contentMd5
-      }
+      return this.probe(new URL(range.location, url).toString(), redirectCount + 1)
     }
+
+    if (range.statusCode === 206) {
+      supportsRanges = true
+      totalBytes = range.totalBytes ?? totalBytes
+      finalUrl = url
+      contentDisposition = range.contentDisposition ?? contentDisposition
+      etag = range.etag ?? etag
+      lastModified = range.lastModified ?? lastModified
+      contentMd5 = range.contentMd5 ?? contentMd5
+    } else if (range.statusCode === 200) {
+      supportsRanges = false
+      totalBytes = range.totalBytes ?? totalBytes
+      contentDisposition = range.contentDisposition ?? contentDisposition
+      etag = range.etag ?? etag
+      lastModified = range.lastModified ?? lastModified
+      contentMd5 = range.contentMd5 ?? contentMd5
+    }
+    // 401/403/416 on the probe Range GET → single-stream with HEAD size if known.
 
     return {
       url: finalUrl,
@@ -812,6 +934,7 @@ export class SegmentedDownloader {
       {
         method: options.method || 'GET',
         headers: {
+          ...buildDefaultHeaders(url),
           ...(this.options.requestHeaders || {}),
           ...(options.headers || {})
         },
@@ -934,7 +1057,7 @@ export class SegmentedDownloader {
   }
 
   private async persistMetaThrottled(): Promise<void> {
-    if (this.metaWriteQueued) {
+    if (this.metaWriteQueued || this.finalized) {
       return
     }
 
@@ -943,19 +1066,27 @@ export class SegmentedDownloader {
     this.metaWriteQueued = true
     await sleep(delay)
     this.metaWriteQueued = false
-    if (!this.abortReason) {
+    if (!this.abortReason && !this.finalized) {
       await this.persistMeta(false)
     }
   }
 
   private async persistMeta(forceSync: boolean): Promise<void> {
-    if (!this.totalBytes || !this.planner || this.segments.length === 0) {
+    if (this.finalized || !this.totalBytes || !this.planner || this.segments.length === 0) {
       return
     }
 
     const run = async (): Promise<void> => {
+      if (this.finalized) {
+        return
+      }
+
       if (forceSync) {
         await this.drainWritesAndSync()
+      }
+
+      if (this.finalized) {
+        return
       }
 
       const payload: MetaFile = {
@@ -974,6 +1105,10 @@ export class SegmentedDownloader {
 
       const tempMeta = `${this.options.metaPath}.tmp`
       await writeFile(tempMeta, JSON.stringify(payload))
+      if (this.finalized) {
+        await removeQuiet(tempMeta)
+        return
+      }
       await rename(tempMeta, this.options.metaPath)
       this.lastMetaWrite = Date.now()
       this.bytesSinceMeta = 0
@@ -985,6 +1120,21 @@ export class SegmentedDownloader {
       () => undefined
     )
     return next
+  }
+
+  private async finalizeCompletedDownload(): Promise<void> {
+    this.finalized = true
+
+    // Let any throttled meta writer finish its sleep and observe `finalized`.
+    while (this.metaWriteQueued) {
+      await sleep(5)
+    }
+    await this.metaChain.catch(() => undefined)
+
+    await this.ensureParentDirectories()
+    await rename(this.options.tempPath, this.options.filePath)
+    await removeQuiet(this.options.metaPath)
+    await removeQuiet(`${this.options.metaPath}.tmp`)
   }
 
   private async validateCompletedFile(): Promise<void> {
@@ -1060,6 +1210,20 @@ function emptyProbe(url: string): ProbeResult {
   }
 }
 
+/** Defaults that help pass hotlink checks when the browser companion did not supply headers. */
+function buildDefaultHeaders(url: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    'User-Agent': DEFAULT_USER_AGENT,
+    Accept: '*/*'
+  }
+  try {
+    headers.Referer = `${new URL(url).origin}/`
+  } catch {
+    // ignore invalid URL — request() will fail later
+  }
+  return headers
+}
+
 function validatorsMatch(
   meta: Pick<MetaFile, 'etag' | 'lastModified'>,
   etag: string | null,
@@ -1123,6 +1287,32 @@ function normalizeMd5(value: string): string | null {
     return trimmed.toLowerCase()
   }
   return null
+}
+
+function isRetryableDownloadError(error: unknown): boolean {
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code?: unknown }).code || '')
+    : ''
+
+  if (
+    [
+      'ECONNRESET',
+      'ECONNREFUSED',
+      'ETIMEDOUT',
+      'EAI_AGAIN',
+      'ENETUNREACH',
+      'EHOSTUNREACH',
+      'EPIPE',
+      'ENOENT'
+    ].includes(code)
+  ) {
+    return true
+  }
+
+  const message = error instanceof Error ? error.message : String(error)
+  return /request timed out|socket hang up|connection closed before the download completed|Server returned HTTP (408|425|429|5\d{2})/i.test(
+    message
+  )
 }
 
 async function md5File(path: string): Promise<string> {

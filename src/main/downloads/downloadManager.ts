@@ -26,6 +26,11 @@ type InternalTask = DownloadTask & {
   downloader?: SegmentedDownloader
 }
 
+/** Disk shape — includes headers that must not be sent to the renderer. */
+type PersistedTask = DownloadTask & {
+  requestHeaders?: Record<string, string>
+}
+
 const DEFAULT_SETTINGS: AppSettings = {
   connections: 8,
   maxConcurrentDownloads: 3,
@@ -100,7 +105,7 @@ export class DownloadManager {
       : safeFileName(nameFromUrl(url, 'download.bin'), 'download.bin')
     const filePath = uniquePath(join(directory, preferredName))
     const now = Date.now()
-    const requestHeaders = normalizeHeaders(input.headers, input.referrer)
+    const requestHeaders = normalizeHeaders(input.headers, input.referrer, url)
     const task: InternalTask = {
       id: randomUUID(),
       url,
@@ -274,22 +279,27 @@ export class DownloadManager {
     task.speedBytesPerSecond = 0
     this.emit(task)
 
-    const downloader = new SegmentedDownloader({
-      id: task.id,
-      url: task.url,
-      filePath: task.filePath,
-      tempPath: task.tempPath,
-      metaPath: task.metaPath,
-      connections: this.settings.connections,
-      minSegmentSizeBytes: this.settings.minSegmentSizeBytes,
-      maxRetries: this.settings.maxSegmentRetries,
-      requestHeaders: task.requestHeaders,
-      onProgress: (progress) => this.handleProgress(task, progress)
-    })
-
-    task.downloader = downloader
-
     try {
+      // The folder may have been removed while this task was queued or while
+      // the app was closed. Recreate it before any network work starts so the
+      // downloader never fails with ENOENT while opening its .part file.
+      mkdirSync(dirname(task.filePath), { recursive: true })
+
+      const downloader = new SegmentedDownloader({
+        id: task.id,
+        url: task.url,
+        filePath: task.filePath,
+        tempPath: task.tempPath,
+        metaPath: task.metaPath,
+        connections: this.settings.connections,
+        minSegmentSizeBytes: this.settings.minSegmentSizeBytes,
+        maxRetries: this.settings.maxSegmentRetries,
+        requestHeaders: task.requestHeaders,
+        onProgress: (progress) => this.handleProgress(task, progress)
+      })
+
+      task.downloader = downloader
+
       await downloader.start()
       if (task.status !== 'downloading') {
         return
@@ -300,6 +310,10 @@ export class DownloadManager {
       task.bytesReceived = task.totalBytes ?? task.bytesReceived
       task.speedBytesPerSecond = 0
       task.downloader = undefined
+      task.segments = undefined
+      // Belt-and-suspenders: downloader removes these, but never leave checkpoints behind.
+      removeQuiet(task.tempPath)
+      removeQuiet(task.metaPath)
       this.persist()
       this.emit(task)
     } catch (error) {
@@ -353,7 +367,7 @@ export class DownloadManager {
 
     try {
       const raw = readFileSync(this.statePath, 'utf8')
-      const parsed = JSON.parse(raw) as DownloadTask[]
+      const parsed = JSON.parse(raw) as PersistedTask[]
       if (!Array.isArray(parsed)) {
         return
       }
@@ -364,6 +378,7 @@ export class DownloadManager {
           tempPath: `${item.filePath}.part`,
           metaPath: `${item.filePath}.part.meta.json`,
           speedBytesPerSecond: 0,
+          requestHeaders: item.requestHeaders,
           segments: item.segments ?? readSegmentsFromMeta(`${item.filePath}.part.meta.json`)
         }
 
@@ -379,7 +394,7 @@ export class DownloadManager {
   }
 
   private persist(): void {
-    const payload = [...this.tasks.values()].map(snapshot)
+    const payload: PersistedTask[] = [...this.tasks.values()].map(persistSnapshot)
     try {
       writeFileSync(this.statePath, JSON.stringify(payload, null, 2))
     } catch {
@@ -458,14 +473,31 @@ function saveSettings(path: string, settings: AppSettings): void {
 
 function normalizeHeaders(
   headers: Record<string, string> | undefined,
-  referrer: string | undefined
+  referrer: string | undefined,
+  url?: string
 ): Record<string, string> | undefined {
   const next: Record<string, string> = { ...(headers || {}) }
   if (referrer && !next.Referer && !next.referer) {
     next.Referer = referrer
   }
+  if (!next.Referer && !next.referer && url) {
+    try {
+      next.Referer = `${new URL(url).origin}/`
+    } catch {
+      // ignore
+    }
+  }
+  if (!hasHeader(next, 'user-agent')) {
+    next['User-Agent'] =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+  }
   const keys = Object.keys(next)
   return keys.length ? next : undefined
+}
+
+function hasHeader(headers: Record<string, string>, name: string): boolean {
+  const lower = name.toLowerCase()
+  return Object.keys(headers).some((key) => key.toLowerCase() === lower)
 }
 
 function uniquePath(filePath: string): string {
@@ -513,6 +545,13 @@ function snapshot(task: InternalTask): DownloadTask {
     updatedAt: task.updatedAt,
     error: task.error,
     segments: task.segments
+  }
+}
+
+function persistSnapshot(task: InternalTask): PersistedTask {
+  return {
+    ...snapshot(task),
+    requestHeaders: task.requestHeaders
   }
 }
 

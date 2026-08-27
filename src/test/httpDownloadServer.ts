@@ -14,12 +14,19 @@ export type HttpFixtureOptions = {
   supportRanges?: boolean
   /** When true, HEAD returns 405 and clients must fall back to GET. */
   rejectHead?: boolean
+  /**
+   * When set, HEAD still advertises Accept-Ranges but ranged GETs return this status
+   * (simulates anti-leech CDNs that forbid download accelerators).
+   */
+  rejectRangeWithStatus?: number
   etag?: string
   lastModified?: string
   contentMd5?: string
   contentDisposition?: string
   /** After this many successful range GETs, subsequent ranges return 200 (simulates lost support). */
   loseRangeAfterRequests?: number
+  /** Drop this many non-range GET connections before sending the body. */
+  failFullGets?: number
 }
 
 export type HttpFixtureServer = {
@@ -36,6 +43,7 @@ export async function createHttpDownloadServer(
   const requests: HttpRequestLog[] = []
   let supportRanges = options.supportRanges !== false
   let rangeGetCount = 0
+  let fullGetFailuresRemaining = options.failFullGets ?? 0
 
   const server = http.createServer((req, res) => {
     const method = req.method || 'GET'
@@ -87,6 +95,12 @@ export async function createHttpDownloadServer(
 
     const wantsRange = Boolean(rangeHeader)
     if (wantsRange && supportRanges) {
+      if (typeof options.rejectRangeWithStatus === 'number') {
+        res.writeHead(options.rejectRangeWithStatus, { 'Content-Type': 'text/plain' })
+        res.end('Range requests forbidden')
+        return
+      }
+
       rangeGetCount += 1
       if (
         typeof options.loseRangeAfterRequests === 'number' &&
@@ -120,6 +134,12 @@ export async function createHttpDownloadServer(
     }
 
     // No range support (or client did not ask): full body.
+    if (!wantsRange && fullGetFailuresRemaining > 0) {
+      fullGetFailuresRemaining -= 1
+      res.destroy()
+      return
+    }
+
     commonHeaders['Content-Length'] = String(options.body.length)
     if (supportRanges) {
       commonHeaders['Accept-Ranges'] = 'bytes'
