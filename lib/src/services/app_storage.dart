@@ -36,7 +36,10 @@ class AppStorage {
   Future<void> saveTasks(Iterable<DownloadTask> tasks) async {
     await prepare();
     final payload = tasks.map((task) => task.toJson()).toList();
-    await tasksFile.writeAsString(const JsonEncoder.withIndent('  ').convert(payload));
+    await _writeAtomically(
+      tasksFile,
+      const JsonEncoder.withIndent('  ').convert(payload),
+    );
   }
 
   Future<DownloadSettings> loadSettings() async {
@@ -55,6 +58,18 @@ class AppStorage {
 
   Future<void> saveSettings(DownloadSettings settings) async {
     await prepare();
-    await settingsFile.writeAsString(const JsonEncoder.withIndent('  ').convert(settings.toJson()));
+    await _writeAtomically(
+      settingsFile,
+      const JsonEncoder.withIndent('  ').convert(settings.toJson()),
+    );
+  }
+
+  Future<void> _writeAtomically(File target, String contents) async {
+    final temporary = File('${target.path}.tmp');
+    await temporary.writeAsString(contents);
+    if (await target.exists()) {
+      await target.delete();
+    }
+    await temporary.rename(target.path);
   }
 }

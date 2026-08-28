@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -6,41 +7,139 @@ import 'package:flutter/material.dart';
 import 'src/core/path_utils.dart';
 import 'src/models/download_models.dart';
 import 'src/services/app_storage.dart';
+import 'src/services/clipboard_link_monitor.dart';
+import 'src/services/desktop_integrations.dart';
 import 'src/services/download_manager.dart';
+import 'src/services/native_messaging.dart';
+import 'src/services/windows_startup.dart';
+import 'package:window_manager/window_manager.dart';
 
 const _background = Color(0xFF12181F);
 const _panel = Color(0xFF1E2630);
 const _border = Color(0xFF2A3541);
 const _primary = Color(0xFFF0A63F);
 const _secondary = Color(0xFF2DD4BF);
+const _activeBlue = Color(0xFF3188E8);
 const _success = Color(0xFF6FCF8E);
 const _error = Color(0xFFE2574C);
 const _text = Color(0xFFE9EEF5);
 const _muted = Color(0xFF91A0B2);
 
-Future<void> main() async {
+Future<void> main([List<String> args = const <String>[]]) async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (args.contains('--native-host')) {
+    await runNativeMessagingHost();
+    // The Windows runner owns a message loop outside the Dart isolate. Exit
+    // explicitly after the browser closes stdin so a one-shot native host
+    // cannot leave a hidden Flutter process behind.
+    exit(0);
+  }
+  try {
+    await windowManager.ensureInitialized();
+    await windowManager.waitUntilReadyToShow(
+      const WindowOptions(
+        size: Size(1280, 720),
+        minimumSize: Size(800, 520),
+        center: true,
+        skipTaskbar: false,
+        title: 'Arus',
+      ),
+      () async {
+        await windowManager.show();
+        await windowManager.focus();
+      },
+    );
+  } catch (_) {
+    // Desktop window control is optional in tests and unsupported targets.
+  }
+  final notifications = DesktopNotificationService();
+  await notifications.initialize();
   final manager = DownloadManager(storage: AppStorage());
   await manager.init();
-  runApp(ArusApp(manager: manager));
+  try {
+    await const WindowsStartupService().setEnabled(
+      manager.settings.launchAtLogin,
+    );
+  } catch (_) {
+    // Login startup is a convenience and can be blocked by enterprise policy.
+  }
+  NativeBridgeServer? bridge;
+  try {
+    bridge = NativeBridgeServer(manager: manager);
+    await bridge.start();
+  } catch (_) {
+    // Browser integration is optional; a locked profile should not prevent
+    // the download manager from starting.
+    bridge = null;
+  }
+  for (final url in args.map(_startupUrl).whereType<String>()) {
+    try {
+      await manager.add(url: url);
+    } catch (_) {
+      // Ignore malformed shell/deep-link arguments and keep the UI usable.
+    }
+  }
+  runApp(
+    ArusApp(manager: manager, bridge: bridge, notifications: notifications),
+  );
+}
+
+String? _startupUrl(String argument) {
+  final raw = argument.startsWith('--add-url=')
+      ? argument.substring('--add-url='.length)
+      : argument;
+  final uri = Uri.tryParse(raw);
+  if (uri == null) {
+    return null;
+  }
+  if (const <String>{
+        'http',
+        'https',
+        'ftp',
+      }.contains(uri.scheme.toLowerCase()) &&
+      uri.host.isNotEmpty) {
+    return raw;
+  }
+  if (uri.scheme.toLowerCase() == 'arus' && uri.host == 'download') {
+    final url = uri.queryParameters['url'];
+    return url != null && isSupportedUrl(url) ? url : null;
+  }
+  return null;
+}
+
+String _shortUrl(String value) {
+  final uri = Uri.tryParse(value);
+  if (uri == null) {
+    return value;
+  }
+  final compact = '${uri.host}${uri.path}';
+  return compact.length <= 54 ? compact : '${compact.substring(0, 51)}…';
 }
 
 class ArusApp extends StatelessWidget {
-  const ArusApp({super.key, required this.manager});
+  const ArusApp({
+    super.key,
+    required this.manager,
+    this.bridge,
+    this.notifications,
+  });
 
   final DownloadManager manager;
+  final NativeBridgeServer? bridge;
+  final DesktopNotificationService? notifications;
 
   @override
   Widget build(BuildContext context) {
-    final scheme = ColorScheme.fromSeed(
-      seedColor: _primary,
-      brightness: Brightness.dark,
-    ).copyWith(
-      primary: _primary,
-      secondary: _secondary,
-      surface: _panel,
-      error: _error,
-    );
+    final scheme =
+        ColorScheme.fromSeed(
+          seedColor: _primary,
+          brightness: Brightness.dark,
+        ).copyWith(
+          primary: _primary,
+          secondary: _secondary,
+          surface: _panel,
+          error: _error,
+        );
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Arus',
@@ -71,37 +170,57 @@ class ArusApp extends StatelessWidget {
             borderRadius: BorderRadius.circular(10),
             borderSide: const BorderSide(color: _primary, width: 1.4),
           ),
-          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 14,
+            vertical: 13,
+          ),
         ),
         dialogTheme: const DialogThemeData(
           backgroundColor: _panel,
           surfaceTintColor: Colors.transparent,
         ),
       ),
-      home: ArusShell(manager: manager),
+      home: ArusShell(
+        manager: manager,
+        bridge: bridge,
+        notifications: notifications,
+      ),
     );
   }
 }
 
 enum _Page { downloads, settings }
 
-enum _Filter { all, downloading, completed, paused, failed, trash }
+enum _Filter { all, active, queued, done, error }
 
 extension on _Filter {
   String get label {
     switch (this) {
       case _Filter.all:
-        return 'Semua';
-      case _Filter.downloading:
-        return 'Mengunduh';
-      case _Filter.completed:
-        return 'Selesai';
-      case _Filter.paused:
-        return 'Dijeda';
-      case _Filter.failed:
-        return 'Gagal';
-      case _Filter.trash:
-        return 'Sampah';
+        return 'All';
+      case _Filter.active:
+        return 'Active';
+      case _Filter.queued:
+        return 'Queued';
+      case _Filter.done:
+        return 'Done';
+      case _Filter.error:
+        return 'Error';
+    }
+  }
+
+  IconData get icon {
+    switch (this) {
+      case _Filter.all:
+        return Icons.format_list_bulleted_rounded;
+      case _Filter.active:
+        return Icons.arrow_downward_rounded;
+      case _Filter.queued:
+        return Icons.schedule_rounded;
+      case _Filter.done:
+        return Icons.check_rounded;
+      case _Filter.error:
+        return Icons.error_outline_rounded;
     }
   }
 
@@ -109,56 +228,131 @@ extension on _Filter {
     switch (this) {
       case _Filter.all:
         return true;
-      case _Filter.downloading:
-        return task.status == DownloadStatus.downloading || task.status == DownloadStatus.queued;
-      case _Filter.completed:
+      case _Filter.active:
+        return task.status == DownloadStatus.downloading ||
+            task.status == DownloadStatus.paused;
+      case _Filter.queued:
+        return task.status == DownloadStatus.queued;
+      case _Filter.done:
         return task.status == DownloadStatus.completed;
-      case _Filter.paused:
-        return task.status == DownloadStatus.paused;
-      case _Filter.failed:
-        return task.status == DownloadStatus.failed;
-      case _Filter.trash:
-        return task.status == DownloadStatus.cancelled;
+      case _Filter.error:
+        return task.status == DownloadStatus.failed ||
+            task.status == DownloadStatus.cancelled;
     }
   }
 }
 
 class ArusShell extends StatefulWidget {
-  const ArusShell({super.key, required this.manager});
+  const ArusShell({
+    super.key,
+    required this.manager,
+    this.bridge,
+    this.notifications,
+  });
 
   final DownloadManager manager;
+  final NativeBridgeServer? bridge;
+  final DesktopNotificationService? notifications;
 
   @override
   State<ArusShell> createState() => _ArusShellState();
 }
 
-class _ArusShellState extends State<ArusShell> {
+class _ArusShellState extends State<ArusShell> with WindowListener {
   _Page _page = _Page.downloads;
   _Filter _filter = _Filter.all;
-  final Set<String> _selected = <String>{};
   final Set<String> _expanded = <String>{};
+  late final ClipboardLinkMonitor _clipboardMonitor;
+  StreamSubscription<String>? _clipboardSubscription;
+  StreamSubscription<DownloadTask>? _completionSubscription;
+  late final ArusTrayController _tray;
+  late bool _lastMinimizeToTray;
 
   DownloadManager get manager => widget.manager;
 
   @override
   void initState() {
     super.initState();
+    _lastMinimizeToTray = manager.settings.minimizeToTray;
     manager.addListener(_cleanSelection);
+    _clipboardMonitor = ClipboardLinkMonitor();
+    _clipboardSubscription = _clipboardMonitor.links.listen(_onClipboardLink);
+    _clipboardMonitor.start();
+    _completionSubscription = manager.completed.listen((task) {
+      final notifications = widget.notifications;
+      if (notifications != null) {
+        unawaited(notifications.completed(task));
+      }
+    });
+    _tray = ArusTrayController(
+      onShow: () async {
+        await windowManager.show();
+        await windowManager.focus();
+      },
+      onExit: windowManager.destroy,
+    );
+    windowManager.addListener(this);
+    unawaited(_initializeDesktopLifecycle());
+  }
+
+  Future<void> _initializeDesktopLifecycle() async {
+    try {
+      await windowManager.setPreventClose(manager.settings.minimizeToTray);
+      await _tray.initialize();
+    } catch (_) {
+      // The app remains fully usable without a tray plugin on unsupported
+      // hosts or during widget tests.
+    }
+  }
+
+  @override
+  void onWindowClose() {
+    if (manager.settings.minimizeToTray && _tray.isReady) {
+      unawaited(windowManager.hide());
+    } else {
+      unawaited(windowManager.destroy());
+    }
   }
 
   @override
   void dispose() {
     manager.removeListener(_cleanSelection);
+    unawaited(_clipboardSubscription?.cancel());
+    unawaited(_completionSubscription?.cancel());
+    _clipboardMonitor.dispose();
+    windowManager.removeListener(this);
+    unawaited(_tray.dispose());
+    final bridge = widget.bridge;
+    if (bridge != null) {
+      unawaited(bridge.stop());
+    }
     super.dispose();
   }
 
-  void _cleanSelection() {
-    final ids = manager.tasks.map((task) => task.id).toSet();
-    final stale = _selected.where((id) => !ids.contains(id)).toList();
-    if (stale.isEmpty || !mounted) {
+  void _onClipboardLink(String url) {
+    if (!mounted) {
       return;
     }
-    setState(() => _selected.removeAll(stale));
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text('Tautan terdeteksi: ${_shortUrl(url)}'),
+          behavior: SnackBarBehavior.floating,
+          action: SnackBarAction(
+            label: 'Tambah',
+            onPressed: () => _run(() => manager.add(url: url)),
+          ),
+        ),
+      );
+  }
+
+  void _cleanSelection() {
+    final minimizeToTray = manager.settings.minimizeToTray;
+    if (minimizeToTray != _lastMinimizeToTray) {
+      _lastMinimizeToTray = minimizeToTray;
+      unawaited(_setWindowPolicy(minimizeToTray));
+    }
   }
 
   Future<void> _run(Future<void> Function() action) async {
@@ -177,6 +371,14 @@ class _ArusShellState extends State<ArusShell> {
     }
   }
 
+  Future<void> _setWindowPolicy(bool minimizeToTray) async {
+    try {
+      await windowManager.setPreventClose(minimizeToTray);
+    } catch (_) {
+      // Window control is optional during tests and on non-desktop targets.
+    }
+  }
+
   void _showAddDialog() {
     showDialog<void>(
       context: context,
@@ -190,27 +392,44 @@ class _ArusShellState extends State<ArusShell> {
       animation: manager,
       builder: (context, _) {
         final tasks = manager.tasks;
+        final activeSpeed = tasks
+            .where((task) => task.status == DownloadStatus.downloading)
+            .fold<int>(0, (sum, task) => sum + task.speedBytesPerSecond);
+        final counts = <_Filter, int>{
+          for (final filter in _Filter.values)
+            filter: tasks.where(filter.matches).length,
+        };
         return Scaffold(
           body: SafeArea(
             child: Row(
               children: <Widget>[
                 _Sidebar(
                   page: _page,
+                  filter: _filter,
+                  counts: counts,
                   onSelect: (page) => setState(() => _page = page),
+                  onFilter: (filter) => setState(() {
+                    _page = _Page.downloads;
+                    _filter = filter;
+                  }),
                 ),
                 Expanded(
                   child: Column(
                     children: <Widget>[
                       _TopBar(
+                        page: _page,
+                        speed: activeSpeed,
                         onAdd: _showAddDialog,
-                        onSettings: () => setState(() => _page = _Page.settings),
+                        onSettings: () =>
+                            setState(() => _page = _Page.settings),
                       ),
                       Expanded(
                         child: _page == _Page.downloads
                             ? _buildDownloads(tasks)
                             : _SettingsView(
                                 manager: manager,
-                                onBack: () => setState(() => _page = _Page.downloads),
+                                onBack: () =>
+                                    setState(() => _page = _Page.downloads),
                               ),
                       ),
                     ],
@@ -226,197 +445,236 @@ class _ArusShellState extends State<ArusShell> {
 
   Widget _buildDownloads(List<DownloadTask> tasks) {
     final visible = tasks.where(_filter.matches).toList();
-    final active = tasks.where((task) => task.status == DownloadStatus.downloading).toList();
-    final queued = tasks.where((task) => task.status == DownloadStatus.queued).length;
-    final totalSpeed = active.fold<int>(0, (sum, task) => sum + task.speedBytesPerSecond);
-    final selectedVisible = visible.where((task) => _selected.contains(task.id)).toList();
-    final allVisibleSelected = visible.isNotEmpty && visible.every((task) => _selected.contains(task.id));
-    final counts = <_Filter, int>{
-      for (final filter in _Filter.values) filter: tasks.where(filter.matches).length,
-    };
+    if (visible.isEmpty) {
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
+        children: const <Widget>[_EmptyState()],
+      );
+    }
 
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        return SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(28, 18, 28, 32),
-          child: ConstrainedBox(
-            constraints: BoxConstraints(minHeight: math.max(0, constraints.maxHeight - 50)),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: <Widget>[
-                _SpeedHero(
-                  active: active.length,
-                  queued: queued,
-                  speed: totalSpeed,
-                  peak: tasks.fold<int>(
-                    0,
-                    (maxSpeed, task) => math.max(maxSpeed, task.speedBytesPerSecond),
-                  ),
-                  onAdd: _showAddDialog,
-                  onSettings: () => setState(() => _page = _Page.settings),
-                ),
-                const SizedBox(height: 18),
-                _ActionBar(
-                  selectedCount: selectedVisible.length,
-                  allSelected: allVisibleSelected,
-                  canPause: selectedVisible.any(
-                    (task) => task.status == DownloadStatus.downloading || task.status == DownloadStatus.queued,
-                  ),
-                  canResume: selectedVisible.any(
-                    (task) => task.status == DownloadStatus.paused ||
-                        task.status == DownloadStatus.failed ||
-                        task.status == DownloadStatus.cancelled,
-                  ),
-                  hasActive: active.isNotEmpty || queued > 0,
-                  hasCompleted: tasks.any((task) => task.status == DownloadStatus.completed),
-                  onToggleAll: () {
-                    setState(() {
-                      if (allVisibleSelected) {
-                        _selected.removeAll(visible.map((task) => task.id));
-                      } else {
-                        _selected.addAll(visible.map((task) => task.id));
-                      }
-                    });
-                  },
-                  onPause: () => _run(() => manager.pauseMany(selectedVisible.map((task) => task.id))),
-                  onResume: () => _run(() => manager.resumeMany(selectedVisible.map((task) => task.id))),
-                  onPauseAll: () => _run(manager.pauseAll),
-                  onRemove: () => _run(() async {
-                    for (final task in selectedVisible) {
-                      await manager.remove(task.id);
-                    }
-                    if (mounted) {
-                      setState(() => _selected.clear());
-                    }
-                  }),
-                  onRemoveCompleted: () => _run(manager.removeCompleted),
-                ),
-                const SizedBox(height: 14),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: <Widget>[
-                    for (final filter in _Filter.values)
-                      ChoiceChip(
-                        label: Text('${filter.label}  ${counts[filter]}'),
-                        selected: _filter == filter,
-                        onSelected: (_) => setState(() => _filter = filter),
-                        selectedColor: _primary.withValues(alpha: 0.18),
-                        side: BorderSide(color: _filter == filter ? _primary : _border),
-                        labelStyle: TextStyle(
-                          color: _filter == filter ? _primary : _muted,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                        ),
-                        showCheckmark: false,
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 14),
-                if (visible.isEmpty)
-                  const _EmptyState()
-                else
-                  for (final task in visible)
-                    _DownloadCard(
-                      task: task,
-                      expanded: _expanded.contains(task.id),
-                      selected: _selected.contains(task.id),
-                      onToggleExpanded: () {
-                        setState(() {
-                          if (!_expanded.add(task.id)) {
-                            _expanded.remove(task.id);
-                          }
-                        });
-                      },
-                      onSelected: (value) {
-                        setState(() {
-                          if (value) {
-                            _selected.add(task.id);
-                          } else {
-                            _selected.remove(task.id);
-                          }
-                        });
-                      },
-                      onPause: () => _run(() => manager.pause(task.id)),
-                      onResume: () => _run(() => manager.resume(task.id)),
-                      onCancel: () => _run(() => manager.cancel(task.id)),
-                      onRemove: () => _run(() async {
-                        await manager.remove(task.id);
-                        if (mounted) {
-                          setState(() => _selected.remove(task.id));
-                        }
-                      }),
-                      onReveal: () => _run(() => manager.revealInFolder(task.id)),
-                    ),
-              ],
-            ),
-          ),
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
+      itemCount: visible.length,
+      separatorBuilder: (_, _) => const SizedBox(height: 1),
+      itemBuilder: (context, index) {
+        final task = visible[index];
+        return _DownloadCard(
+          task: task,
+          expanded: _expanded.contains(task.id),
+          onToggleExpanded: () {
+            setState(() {
+              if (!_expanded.add(task.id)) {
+                _expanded.remove(task.id);
+              }
+            });
+          },
+          onPause: () => _run(() => manager.pause(task.id)),
+          onResume: () => _run(() => manager.resume(task.id)),
+          onCancel: () => _run(() => manager.cancel(task.id)),
+          onReveal: () => _run(() => manager.revealInFolder(task.id)),
+          onRemove: () => _confirmRemove(task),
         );
       },
     );
   }
+
+  Future<void> _confirmRemove(DownloadTask task) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Hapus dari daftar?'),
+        content: Text(
+          '“${task.fileName}” akan dihapus dari daftar unduhan. '
+          'File hasil unduhan yang sudah ada tidak akan dihapus.',
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Batal'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            style: FilledButton.styleFrom(
+              backgroundColor: _error,
+              foregroundColor: _text,
+            ),
+            child: const Text('Hapus dari daftar'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) {
+      return;
+    }
+    await _run(() => manager.remove(task.id));
+    if (mounted) {
+      setState(() => _expanded.remove(task.id));
+    }
+  }
 }
 
 class _Sidebar extends StatelessWidget {
-  const _Sidebar({required this.page, required this.onSelect});
+  const _Sidebar({
+    required this.page,
+    required this.filter,
+    required this.counts,
+    required this.onSelect,
+    required this.onFilter,
+  });
 
   final _Page page;
+  final _Filter filter;
+  final Map<_Filter, int> counts;
   final ValueChanged<_Page> onSelect;
+  final ValueChanged<_Filter> onFilter;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 92,
-      color: _panel,
+      width: 146,
+      decoration: const BoxDecoration(
+        color: _panel,
+        border: Border(right: BorderSide(color: _border)),
+      ),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          const SizedBox(height: 20),
-          Container(
-            width: 42,
-            height: 42,
-            decoration: BoxDecoration(
-              color: _primary.withValues(alpha: 0.16),
-              borderRadius: BorderRadius.circular(13),
-              border: Border.all(color: _primary.withValues(alpha: 0.38)),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 18, 16, 0),
+            child: Row(
+              children: <Widget>[
+                Container(
+                  width: 28,
+                  height: 28,
+                  decoration: BoxDecoration(
+                    color: _primary.withValues(alpha: 0.16),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: _primary.withValues(alpha: 0.38)),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: Image.asset(
+                    'assets/arus_logo.png',
+                    fit: BoxFit.cover,
+                    errorBuilder: (context, error, stackTrace) => const Icon(
+                      Icons.bolt_rounded,
+                      color: _primary,
+                      size: 17,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 9),
+                const Text(
+                  'Arus',
+                  style: TextStyle(
+                    color: _text,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
             ),
-            clipBehavior: Clip.antiAlias,
-            child: Image.asset(
-              'assets/arus_logo.png',
-              fit: BoxFit.cover,
-              errorBuilder: (context, error, stackTrace) => const Icon(
-                Icons.bolt_rounded,
-                color: _primary,
-                size: 24,
+          ),
+          const SizedBox(height: 30),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 18),
+            child: Text(
+              'LIBRARY',
+              style: TextStyle(
+                color: _muted,
+                fontSize: 9,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.2,
               ),
             ),
           ),
-          const SizedBox(height: 28),
+          const SizedBox(height: 8),
+          for (final item in _Filter.values)
+            _SidebarFilterButton(
+              filter: item,
+              count: counts[item] ?? 0,
+              selected: page == _Page.downloads && filter == item,
+              onPressed: () => onFilter(item),
+            ),
+          const Spacer(),
+          const Divider(height: 1),
+          const SizedBox(height: 8),
           _NavButton(
-            icon: Icons.download_rounded,
-            label: 'Unduhan',
-            selected: page == _Page.downloads,
-            onPressed: () => onSelect(_Page.downloads),
-          ),
-          _NavButton(
-            icon: Icons.tune_rounded,
-            label: 'Pengaturan',
+            icon: Icons.settings_outlined,
+            label: 'Settings',
             selected: page == _Page.settings,
             onPressed: () => onSelect(_Page.settings),
           ),
-          const Spacer(),
-          Padding(
-            padding: const EdgeInsets.only(bottom: 18),
-            child: Text(
-              'ARUS',
-              style: TextStyle(
-                color: _muted.withValues(alpha: 0.65),
-                fontSize: 10,
-                letterSpacing: 2.2,
-                fontWeight: FontWeight.w700,
+          const SizedBox(height: 10),
+        ],
+      ),
+    );
+  }
+}
+
+class _SidebarFilterButton extends StatelessWidget {
+  const _SidebarFilterButton({
+    required this.filter,
+    required this.count,
+    required this.selected,
+    required this.onPressed,
+  });
+
+  final _Filter filter;
+  final int count;
+  final bool selected;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final foreground = selected ? _text : _muted;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+      child: Material(
+        color: selected ? _primary.withValues(alpha: 0.12) : Colors.transparent,
+        borderRadius: BorderRadius.circular(7),
+        child: InkWell(
+          onTap: onPressed,
+          borderRadius: BorderRadius.circular(7),
+          child: SizedBox(
+            height: 37,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 9),
+              child: Row(
+                children: <Widget>[
+                  Icon(
+                    filter.icon,
+                    size: 16,
+                    color: selected ? _primary : foreground,
+                  ),
+                  const SizedBox(width: 9),
+                  Expanded(
+                    child: Text(
+                      filter.label,
+                      style: TextStyle(
+                        color: foreground,
+                        fontSize: 12,
+                        fontWeight: selected
+                            ? FontWeight.w700
+                            : FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                  Text(
+                    '$count',
+                    style: TextStyle(
+                      color: selected
+                          ? _primary
+                          : _muted.withValues(alpha: 0.8),
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
-        ],
+        ),
       ),
     );
   }
@@ -438,18 +696,39 @@ class _NavButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      child: Tooltip(
-        message: label,
-        child: IconButton(
-          onPressed: onPressed,
-          style: IconButton.styleFrom(
-            backgroundColor: selected ? _primary.withValues(alpha: 0.16) : Colors.transparent,
-            foregroundColor: selected ? _primary : _muted,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            fixedSize: const Size(68, 50),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+      child: Material(
+        color: selected ? _primary.withValues(alpha: 0.12) : Colors.transparent,
+        borderRadius: BorderRadius.circular(7),
+        child: InkWell(
+          onTap: onPressed,
+          borderRadius: BorderRadius.circular(7),
+          child: SizedBox(
+            height: 37,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 9),
+              child: Row(
+                children: <Widget>[
+                  Icon(icon, size: 17, color: selected ? _primary : _muted),
+                  const SizedBox(width: 9),
+                  Expanded(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: selected ? _text : _muted,
+                        fontSize: 12,
+                        fontWeight: selected
+                            ? FontWeight.w700
+                            : FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
-          icon: Icon(icon, size: 22),
         ),
       ),
     );
@@ -457,53 +736,74 @@ class _NavButton extends StatelessWidget {
 }
 
 class _TopBar extends StatelessWidget {
-  const _TopBar({required this.onAdd, required this.onSettings});
+  const _TopBar({
+    required this.page,
+    required this.speed,
+    required this.onAdd,
+    required this.onSettings,
+  });
 
+  final _Page page;
+  final int speed;
   final VoidCallback onAdd;
   final VoidCallback onSettings;
 
   @override
   Widget build(BuildContext context) {
+    final downloads = page == _Page.downloads;
     return Container(
-      height: 64,
-      padding: const EdgeInsets.symmetric(horizontal: 28),
+      height: 58,
+      padding: const EdgeInsets.symmetric(horizontal: 20),
       decoration: const BoxDecoration(
         color: _background,
         border: Border(bottom: BorderSide(color: _border)),
       ),
       child: Row(
         children: <Widget>[
-          const Text(
-            'Arus',
-            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, letterSpacing: 0.2),
+          Icon(
+            downloads ? Icons.download_rounded : Icons.settings_outlined,
+            color: downloads ? _text : _muted,
+            size: 18,
           ),
-          const SizedBox(width: 10),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: BoxDecoration(
-              color: _secondary.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(6),
-            ),
-            child: const Text(
-              'DOWNLOAD MANAGER',
-              style: TextStyle(color: _secondary, fontSize: 9, letterSpacing: 1.1, fontWeight: FontWeight.w700),
+          const SizedBox(width: 9),
+          Text(
+            downloads ? 'Downloads' : 'Settings',
+            style: const TextStyle(
+              color: _text,
+              fontSize: 14,
+              fontWeight: FontWeight.w700,
             ),
           ),
           const Spacer(),
+          if (downloads) ...<Widget>[
+            Text(
+              formatSpeed(speed),
+              style: const TextStyle(
+                color: _muted,
+                fontSize: 11,
+                fontFamily: 'monospace',
+              ),
+            ),
+            const SizedBox(width: 14),
+          ],
           IconButton(
             onPressed: onSettings,
-            tooltip: 'Pengaturan',
-            icon: const Icon(Icons.settings_outlined, color: _muted, size: 20),
+            tooltip: 'Settings',
+            icon: const Icon(Icons.settings_outlined, color: _muted, size: 18),
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: 5),
           FilledButton.icon(
             onPressed: onAdd,
-            icon: const Icon(Icons.add_rounded, size: 18),
-            label: const Text('Unduhan baru'),
+            icon: const Icon(Icons.add_rounded, size: 17),
+            label: const Text('Add download'),
             style: FilledButton.styleFrom(
               backgroundColor: _primary,
               foregroundColor: _background,
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              textStyle: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
             ),
           ),
         ],
@@ -512,6 +812,7 @@ class _TopBar extends StatelessWidget {
   }
 }
 
+// ignore: unused_element
 class _SpeedHero extends StatelessWidget {
   const _SpeedHero({
     required this.active,
@@ -540,7 +841,9 @@ class _SpeedHero extends StatelessWidget {
             final compact = constraints.maxWidth < 600;
             return Flex(
               direction: compact ? Axis.vertical : Axis.horizontal,
-              crossAxisAlignment: compact ? CrossAxisAlignment.stretch : CrossAxisAlignment.center,
+              crossAxisAlignment: compact
+                  ? CrossAxisAlignment.stretch
+                  : CrossAxisAlignment.center,
               children: <Widget>[
                 Expanded(
                   flex: compact ? 0 : 3,
@@ -551,13 +854,22 @@ class _SpeedHero extends StatelessWidget {
                         children: <Widget>[
                           const Text(
                             'KECEPATAN GABUNGAN',
-                            style: TextStyle(color: _muted, fontSize: 11, letterSpacing: 1.3, fontWeight: FontWeight.w700),
+                            style: TextStyle(
+                              color: _muted,
+                              fontSize: 11,
+                              letterSpacing: 1.3,
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
                           const Spacer(),
                           IconButton(
                             onPressed: onSettings,
                             tooltip: 'Koneksi paralel',
-                            icon: const Icon(Icons.tune_rounded, color: _muted, size: 18),
+                            icon: const Icon(
+                              Icons.tune_rounded,
+                              color: _muted,
+                              size: 18,
+                            ),
                           ),
                         ],
                       ),
@@ -577,7 +889,11 @@ class _SpeedHero extends StatelessWidget {
                         spacing: 10,
                         runSpacing: 8,
                         children: <Widget>[
-                          _StatPill(label: 'Aktif', value: '$active', accent: _secondary),
+                          _StatPill(
+                            label: 'Aktif',
+                            value: '$active',
+                            accent: _secondary,
+                          ),
                           _StatPill(label: 'Antrean', value: '$queued'),
                           _StatPill(label: 'Puncak', value: formatSpeed(peak)),
                         ],
@@ -626,7 +942,14 @@ class _StatPill extends StatelessWidget {
         children: <Widget>[
           Text(label, style: const TextStyle(color: _muted, fontSize: 11)),
           const SizedBox(width: 8),
-          Text(value, style: TextStyle(color: accent ?? _text, fontSize: 12, fontWeight: FontWeight.w700)),
+          Text(
+            value,
+            style: TextStyle(
+              color: accent ?? _text,
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
         ],
       ),
     );
@@ -662,9 +985,20 @@ class _SpeedGauge extends StatelessWidget {
           Column(
             mainAxisSize: MainAxisSize.min,
             children: <Widget>[
-              Icon(Icons.speed_rounded, color: speed > 0 ? _secondary : _muted, size: 22),
+              Icon(
+                Icons.speed_rounded,
+                color: speed > 0 ? _secondary : _muted,
+                size: 22,
+              ),
               const SizedBox(height: 4),
-              Text(speed > 0 ? 'AKTIF' : 'SIAP', style: const TextStyle(color: _muted, fontSize: 10, letterSpacing: 1.2)),
+              Text(
+                speed > 0 ? 'AKTIF' : 'SIAP',
+                style: const TextStyle(
+                  color: _muted,
+                  fontSize: 10,
+                  letterSpacing: 1.2,
+                ),
+              ),
             ],
           ),
         ],
@@ -673,6 +1007,7 @@ class _SpeedGauge extends StatelessWidget {
   }
 }
 
+// ignore: unused_element
 class _ActionBar extends StatelessWidget {
   const _ActionBar({
     required this.selectedCount,
@@ -719,13 +1054,30 @@ class _ActionBar extends StatelessWidget {
         ),
         const Spacer(),
         if (selectedCount > 0 && canPause)
-          _ToolbarButton(icon: Icons.pause_rounded, label: 'Jeda', onPressed: onPause),
+          _ToolbarButton(
+            icon: Icons.pause_rounded,
+            label: 'Jeda',
+            onPressed: onPause,
+          ),
         if (selectedCount > 0 && canResume)
-          _ToolbarButton(icon: Icons.play_arrow_rounded, label: 'Lanjut', onPressed: onResume),
+          _ToolbarButton(
+            icon: Icons.play_arrow_rounded,
+            label: 'Lanjut',
+            onPressed: onResume,
+          ),
         if (selectedCount > 0)
-          _ToolbarButton(icon: Icons.delete_outline_rounded, label: 'Hapus', onPressed: onRemove, danger: true),
+          _ToolbarButton(
+            icon: Icons.delete_outline_rounded,
+            label: 'Hapus',
+            onPressed: onRemove,
+            danger: true,
+          ),
         if (selectedCount == 0 && hasActive)
-          _ToolbarButton(icon: Icons.pause_circle_outline_rounded, label: 'Jeda semua', onPressed: onPauseAll),
+          _ToolbarButton(
+            icon: Icons.pause_circle_outline_rounded,
+            label: 'Jeda semua',
+            onPressed: onPauseAll,
+          ),
         if (selectedCount == 0 && hasCompleted)
           _ToolbarButton(
             icon: Icons.cleaning_services_outlined,
@@ -760,7 +1112,9 @@ class _ToolbarButton extends StatelessWidget {
         label: Text(label),
         style: OutlinedButton.styleFrom(
           foregroundColor: danger ? _error : _muted,
-          side: BorderSide(color: danger ? _error.withValues(alpha: 0.5) : _border),
+          side: BorderSide(
+            color: danger ? _error.withValues(alpha: 0.5) : _border,
+          ),
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
           textStyle: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
         ),
@@ -779,9 +1133,16 @@ class _EmptyState extends StatelessWidget {
         padding: const EdgeInsets.symmetric(vertical: 58, horizontal: 24),
         child: Column(
           children: <Widget>[
-            Icon(Icons.download_for_offline_outlined, color: _muted.withValues(alpha: 0.55), size: 42),
+            Icon(
+              Icons.download_for_offline_outlined,
+              color: _muted.withValues(alpha: 0.55),
+              size: 42,
+            ),
             const SizedBox(height: 14),
-            const Text('Belum ada unduhan di sini.', style: TextStyle(color: _muted, fontSize: 13)),
+            const Text(
+              'Belum ada unduhan di sini.',
+              style: TextStyle(color: _muted, fontSize: 13),
+            ),
             const SizedBox(height: 6),
             const Text(
               'Tambahkan URL untuk memulai unduhan dengan koneksi paralel.',
@@ -799,111 +1160,138 @@ class _DownloadCard extends StatelessWidget {
   const _DownloadCard({
     required this.task,
     required this.expanded,
-    required this.selected,
     required this.onToggleExpanded,
-    required this.onSelected,
     required this.onPause,
     required this.onResume,
     required this.onCancel,
-    required this.onRemove,
     required this.onReveal,
+    required this.onRemove,
   });
 
   final DownloadTask task;
   final bool expanded;
-  final bool selected;
   final VoidCallback onToggleExpanded;
-  final ValueChanged<bool> onSelected;
   final VoidCallback onPause;
   final VoidCallback onResume;
   final VoidCallback onCancel;
-  final VoidCallback onRemove;
   final VoidCallback onReveal;
+  final VoidCallback onRemove;
 
   @override
   Widget build(BuildContext context) {
-    final active = task.status == DownloadStatus.downloading;
-    final canPause = task.status == DownloadStatus.downloading || task.status == DownloadStatus.queued;
-    final canResume = task.status == DownloadStatus.paused ||
-        task.status == DownloadStatus.failed ||
-        task.status == DownloadStatus.cancelled;
-    final canCancel = task.status == DownloadStatus.downloading ||
-        task.status == DownloadStatus.queued ||
+    final showsProgress =
+        task.status == DownloadStatus.downloading ||
         task.status == DownloadStatus.paused;
-    final canRemove = task.status == DownloadStatus.completed ||
-        task.status == DownloadStatus.failed ||
-        task.status == DownloadStatus.cancelled ||
-        task.status == DownloadStatus.paused;
-
     return Card(
-      margin: const EdgeInsets.only(bottom: 10),
+      margin: EdgeInsets.zero,
+      elevation: 0,
+      color: _panel,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(4),
+        side: const BorderSide(color: _border, width: 0.7),
+      ),
       child: Column(
         children: <Widget>[
           InkWell(
             onTap: onToggleExpanded,
             borderRadius: expanded
-                ? const BorderRadius.vertical(top: Radius.circular(12))
-                : BorderRadius.circular(12),
+                ? const BorderRadius.vertical(top: Radius.circular(4))
+                : BorderRadius.circular(4),
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 12, 10, 12),
-              child: Row(
+              padding: const EdgeInsets.fromLTRB(14, 13, 10, 11),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: <Widget>[
-                  Checkbox(
-                    value: selected,
-                    onChanged: (value) => onSelected(value ?? false),
-                    activeColor: _primary,
-                    checkColor: _background,
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: <Widget>[
+                      _FileTypeIcon(task: task),
+                      const SizedBox(width: 11),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Text(
+                              task.fileName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: task.status == DownloadStatus.cancelled
+                                    ? _muted
+                                    : _text,
+                                fontWeight: FontWeight.w700,
+                                fontSize: 13,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              _taskSize(task),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: _muted,
+                                fontSize: 11,
+                                fontFamily: 'monospace',
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      _StatusChip(status: task.status),
+                    ],
                   ),
-                  _ProgressRing(task: task, active: active),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: <Widget>[
-                        Text(
-                          task.fileName,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: task.status == DownloadStatus.cancelled ? _muted : _text,
-                            fontWeight: FontWeight.w600,
-                            fontSize: 13,
-                          ),
-                        ),
-                        const SizedBox(height: 5),
-                        Text(
-                          _taskMeta(task),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(color: _muted, fontSize: 11, fontFamily: 'monospace'),
-                        ),
-                      ],
+                  if (showsProgress) ...<Widget>[
+                    const SizedBox(height: 10),
+                    _SegmentedProgressBar(task: task),
+                    const SizedBox(height: 8),
+                    Text(
+                      _taskMeta(task),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: _muted,
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 12),
-                  _StatusChip(status: task.status),
-                  const SizedBox(width: 8),
-                  _SmallIconButton(
-                    icon: canPause
-                        ? Icons.pause_rounded
-                        : (canResume ? Icons.play_arrow_rounded : Icons.folder_outlined),
-                    tooltip: canPause ? 'Jeda' : (canResume ? 'Lanjut' : 'Tampilkan di folder'),
-                    color: canPause ? _muted : (canResume ? _secondary : _muted),
-                    onPressed: canPause ? onPause : (canResume ? onResume : onReveal),
-                  ),
-                  _SmallIconButton(
-                    icon: canCancel
-                        ? Icons.stop_rounded
-                        : (canRemove ? Icons.delete_outline_rounded : Icons.folder_open_outlined),
-                    tooltip: canCancel ? 'Stop' : (canRemove ? 'Hapus' : 'Tampilkan di folder'),
-                    color: canCancel ? _error : _muted,
-                    onPressed: canCancel ? onCancel : (canRemove ? onRemove : onReveal),
-                  ),
-                  _SmallIconButton(
-                    icon: expanded ? Icons.keyboard_arrow_up_rounded : Icons.keyboard_arrow_down_rounded,
-                    tooltip: expanded ? 'Sembunyikan detail' : 'Tampilkan detail',
-                    color: _muted,
-                    onPressed: onToggleExpanded,
+                  ] else ...<Widget>[
+                    const SizedBox(height: 6),
+                    Text(
+                      _taskMeta(task),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: task.status == DownloadStatus.failed
+                            ? _error
+                            : _muted,
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 9),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: <Widget>[
+                      _StatusActions(
+                        status: task.status,
+                        onPause: onPause,
+                        onResume: onResume,
+                        onCancel: onCancel,
+                        onReveal: onReveal,
+                        onRemove: onRemove,
+                      ),
+                      const SizedBox(width: 6),
+                      _SmallIconButton(
+                        icon: expanded
+                            ? Icons.keyboard_arrow_up_rounded
+                            : Icons.keyboard_arrow_down_rounded,
+                        tooltip: expanded ? 'Hide details' : 'Show details',
+                        color: _muted,
+                        onPressed: onToggleExpanded,
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -918,47 +1306,262 @@ class _DownloadCard extends StatelessWidget {
 
 String _taskMeta(DownloadTask task) {
   final total = task.totalBytes == null ? '?' : formatBytes(task.totalBytes!);
-  final speed = task.speedBytesPerSecond > 0 ? ' · ${formatSpeed(task.speedBytesPerSecond)}' : '';
-  final connections = task.segments == null || task.segments!.isEmpty ? 1 : task.segments!.length;
-  return '${task.progress.toStringAsFixed(1)}% · ${formatBytes(task.bytesReceived)} / $total · $connections koneksi$speed';
+  final connections = task.segments == null || task.segments!.isEmpty
+      ? 1
+      : task.segments!.length;
+  switch (task.status) {
+    case DownloadStatus.downloading:
+      final speed = task.speedBytesPerSecond > 0
+          ? formatSpeed(task.speedBytesPerSecond)
+          : 'starting';
+      final remaining = task.totalBytes == null
+          ? 'ETA —'
+          : 'ETA ${formatEta(math.max(0, task.totalBytes! - task.bytesReceived), task.speedBytesPerSecond)}';
+      return '$speed · $connections connections · $remaining';
+    case DownloadStatus.queued:
+      return '$total · waiting in queue';
+    case DownloadStatus.completed:
+      return '$total · finished';
+    case DownloadStatus.paused:
+      return '${task.progress.round()}% · paused';
+    case DownloadStatus.failed:
+      return task.error?.isNotEmpty == true ? task.error! : 'connection lost';
+    case DownloadStatus.cancelled:
+      return 'cancelled';
+  }
 }
 
-class _ProgressRing extends StatelessWidget {
-  const _ProgressRing({required this.task, required this.active});
+String _taskSize(DownloadTask task) {
+  if (task.totalBytes != null) {
+    return formatBytes(task.totalBytes!);
+  }
+  if (task.bytesReceived > 0) {
+    return '${formatBytes(task.bytesReceived)} downloaded';
+  }
+  return 'size unknown';
+}
+
+Color _statusColor(DownloadStatus status) {
+  return switch (status) {
+    DownloadStatus.downloading => _activeBlue,
+    DownloadStatus.queued => _muted,
+    DownloadStatus.completed => _success,
+    DownloadStatus.failed => _error,
+    DownloadStatus.paused || DownloadStatus.cancelled => _muted,
+  };
+}
+
+String _statusLabel(DownloadStatus status) {
+  return switch (status) {
+    DownloadStatus.downloading => 'active',
+    DownloadStatus.queued => 'queued',
+    DownloadStatus.completed => 'done',
+    DownloadStatus.failed => 'error',
+    DownloadStatus.paused => 'paused',
+    DownloadStatus.cancelled => 'cancelled',
+  };
+}
+
+class _FileTypeIcon extends StatelessWidget {
+  const _FileTypeIcon({required this.task});
 
   final DownloadTask task;
-  final bool active;
 
   @override
   Widget build(BuildContext context) {
-    final color = switch (task.status) {
-      DownloadStatus.completed => _success,
-      DownloadStatus.failed => _error,
-      DownloadStatus.downloading || DownloadStatus.queued => _secondary,
-      _ => _muted,
+    final extension = task.fileName.contains('.')
+        ? task.fileName.split('.').last.toLowerCase()
+        : '';
+    final icon = switch (extension) {
+      'zip' || '7z' || 'rar' => Icons.archive_outlined,
+      'iso' || 'img' => Icons.album_outlined,
+      'mp4' || 'mkv' || 'mov' || 'avi' => Icons.videocam_outlined,
+      'mp3' || 'wav' || 'flac' => Icons.headphones_outlined,
+      'exe' || 'msi' => Icons.apps_outlined,
+      'csv' || 'json' || 'xml' => Icons.data_object_outlined,
+      'pdf' => Icons.picture_as_pdf_outlined,
+      _ => Icons.insert_drive_file_outlined,
     };
     return SizedBox(
-      width: 42,
-      height: 42,
-      child: Stack(
-        alignment: Alignment.center,
+      width: 25,
+      height: 25,
+      child: Icon(icon, color: _statusColor(task.status), size: 18),
+    );
+  }
+}
+
+class _SegmentedProgressBar extends StatelessWidget {
+  const _SegmentedProgressBar({required this.task});
+
+  final DownloadTask task;
+
+  @override
+  Widget build(BuildContext context) {
+    final segments = task.segments;
+    if (segments == null || segments.isEmpty) {
+      return _ProgressTrack(value: (task.progress / 100).clamp(0, 1));
+    }
+    return SizedBox(
+      height: 6,
+      child: Row(
         children: <Widget>[
-          CircularProgressIndicator(
-            value: task.status == DownloadStatus.completed ? 1 : (task.progress / 100).clamp(0, 1),
-            strokeWidth: 3,
-            color: color,
-            backgroundColor: _border,
-          ),
-          if (task.status == DownloadStatus.completed)
-            const Icon(Icons.check_rounded, color: _success, size: 17)
-          else
-            Text(
-              '${task.progress.round()}',
-              style: TextStyle(color: active ? _secondary : _muted, fontSize: 10, fontWeight: FontWeight.w700),
-            ),
+          for (var index = 0; index < segments.length; index += 1) ...<Widget>[
+            if (index > 0) const SizedBox(width: 4),
+            Expanded(child: _ProgressTrack(value: segments[index].progress)),
+          ],
         ],
       ),
     );
+  }
+}
+
+class _ProgressTrack extends StatelessWidget {
+  const _ProgressTrack({required this.value});
+
+  final double value;
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(2),
+      child: LinearProgressIndicator(
+        value: value,
+        minHeight: 5,
+        backgroundColor: _border,
+        color: _activeBlue,
+      ),
+    );
+  }
+}
+
+class _StatusActions extends StatelessWidget {
+  const _StatusActions({
+    required this.status,
+    required this.onPause,
+    required this.onResume,
+    required this.onCancel,
+    required this.onReveal,
+    required this.onRemove,
+  });
+
+  final DownloadStatus status;
+  final VoidCallback onPause;
+  final VoidCallback onResume;
+  final VoidCallback onCancel;
+  final VoidCallback onReveal;
+  final VoidCallback onRemove;
+
+  Widget _removeButton() {
+    return _SmallIconButton(
+      icon: Icons.delete_outline_rounded,
+      tooltip: 'Remove from list',
+      color: _error,
+      onPressed: onRemove,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    switch (status) {
+      case DownloadStatus.downloading:
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            _SmallIconButton(
+              icon: Icons.pause_rounded,
+              tooltip: 'Pause',
+              color: _muted,
+              onPressed: onPause,
+            ),
+            const SizedBox(width: 6),
+            _SmallIconButton(
+              icon: Icons.close_rounded,
+              tooltip: 'Cancel',
+              color: _muted,
+              onPressed: onCancel,
+            ),
+            const SizedBox(width: 6),
+            _removeButton(),
+          ],
+        );
+      case DownloadStatus.paused:
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            _SmallIconButton(
+              icon: Icons.play_arrow_rounded,
+              tooltip: 'Resume',
+              color: _secondary,
+              onPressed: onResume,
+            ),
+            const SizedBox(width: 6),
+            _SmallIconButton(
+              icon: Icons.close_rounded,
+              tooltip: 'Cancel',
+              color: _muted,
+              onPressed: onCancel,
+            ),
+            const SizedBox(width: 6),
+            _removeButton(),
+          ],
+        );
+      case DownloadStatus.queued:
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            _SmallIconButton(
+              icon: Icons.close_rounded,
+              tooltip: 'Cancel',
+              color: _muted,
+              onPressed: onCancel,
+            ),
+            const SizedBox(width: 6),
+            _removeButton(),
+          ],
+        );
+      case DownloadStatus.failed:
+      case DownloadStatus.cancelled:
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            OutlinedButton.icon(
+              onPressed: onResume,
+              icon: const Icon(Icons.refresh_rounded, size: 14),
+              label: const Text('Retry'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: _text,
+                side: const BorderSide(color: _border),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
+                ),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                textStyle: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            _removeButton(),
+          ],
+        );
+      case DownloadStatus.completed:
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            _SmallIconButton(
+              icon: Icons.folder_outlined,
+              tooltip: 'Open folder',
+              color: _muted,
+              onPressed: onReveal,
+            ),
+            const SizedBox(width: 6),
+            _removeButton(),
+          ],
+        );
+    }
   }
 }
 
@@ -969,12 +1572,7 @@ class _StatusChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = switch (status) {
-      DownloadStatus.completed => _success,
-      DownloadStatus.failed => _error,
-      DownloadStatus.downloading || DownloadStatus.queued => _secondary,
-      _ => _muted,
-    };
+    final color = _statusColor(status);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
       decoration: BoxDecoration(
@@ -982,8 +1580,12 @@ class _StatusChip extends StatelessWidget {
         borderRadius: BorderRadius.circular(6),
       ),
       child: Text(
-        status.label,
-        style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.w700),
+        _statusLabel(status),
+        style: TextStyle(
+          color: color,
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+        ),
       ),
     );
   }
@@ -1010,6 +1612,13 @@ class _SmallIconButton extends StatelessWidget {
       visualDensity: VisualDensity.compact,
       iconSize: 17,
       color: color,
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints.tightFor(width: 31, height: 31),
+      style: IconButton.styleFrom(
+        foregroundColor: color,
+        side: const BorderSide(color: _border),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+      ),
       icon: Icon(icon),
     );
   }
@@ -1025,10 +1634,10 @@ class _DownloadDetails extends StatelessWidget {
     final segments = task.segments;
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(68, 4, 20, 18),
+      padding: const EdgeInsets.fromLTRB(18, 4, 16, 16),
       decoration: const BoxDecoration(
         color: _background,
-        borderRadius: BorderRadius.vertical(bottom: Radius.circular(12)),
+        borderRadius: BorderRadius.vertical(bottom: Radius.circular(4)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1054,14 +1663,22 @@ class _DownloadDetails extends StatelessWidget {
           else ...<Widget>[
             const Text(
               'UNDUHAN PARALEL',
-              style: TextStyle(color: _muted, fontSize: 10, letterSpacing: 1.1, fontWeight: FontWeight.w700),
+              style: TextStyle(
+                color: _muted,
+                fontSize: 10,
+                letterSpacing: 1.1,
+                fontWeight: FontWeight.w700,
+              ),
             ),
             const SizedBox(height: 8),
             for (final segment in segments) _SegmentLine(segment: segment),
           ],
           if (task.error != null) ...<Widget>[
             const SizedBox(height: 12),
-            Text(task.error!, style: const TextStyle(color: _error, fontSize: 11)),
+            Text(
+              task.error!,
+              style: const TextStyle(color: _error, fontSize: 11),
+            ),
           ],
         ],
       ),
@@ -1080,12 +1697,22 @@ class _DetailLine extends StatelessWidget {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        SizedBox(width: 68, child: Text(label, style: const TextStyle(color: _muted, fontSize: 10))),
+        SizedBox(
+          width: 68,
+          child: Text(
+            label,
+            style: const TextStyle(color: _muted, fontSize: 10),
+          ),
+        ),
         Expanded(
           child: SelectableText(
             value,
             maxLines: 2,
-            style: const TextStyle(color: _text, fontSize: 11, fontFamily: 'monospace'),
+            style: const TextStyle(
+              color: _text,
+              fontSize: 11,
+              fontFamily: 'monospace',
+            ),
           ),
         ),
       ],
@@ -1105,7 +1732,13 @@ class _SegmentLine extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: 6),
       child: Row(
         children: <Widget>[
-          SizedBox(width: 28, child: Text('#${segment.index + 1}', style: const TextStyle(color: _muted, fontSize: 10))),
+          SizedBox(
+            width: 28,
+            child: Text(
+              '#${segment.index + 1}',
+              style: const TextStyle(color: _muted, fontSize: 10),
+            ),
+          ),
           Expanded(
             child: ClipRRect(
               borderRadius: BorderRadius.circular(3),
@@ -1123,7 +1756,11 @@ class _SegmentLine extends StatelessWidget {
             child: Text(
               '${formatBytes(segment.downloaded)} / ${formatBytes(segment.length)}',
               textAlign: TextAlign.right,
-              style: const TextStyle(color: _muted, fontSize: 10, fontFamily: 'monospace'),
+              style: const TextStyle(
+                color: _muted,
+                fontSize: 10,
+                fontFamily: 'monospace',
+              ),
             ),
           ),
         ],
@@ -1138,7 +1775,10 @@ class _SettingsView extends StatelessWidget {
   final DownloadManager manager;
   final VoidCallback onBack;
 
-  Future<void> _update(Future<void> Function() action, BuildContext context) async {
+  Future<void> _update(
+    Future<void> Function() action,
+    BuildContext context,
+  ) async {
     try {
       await action();
     } catch (error) {
@@ -1159,14 +1799,23 @@ class _SettingsView extends StatelessWidget {
       children: <Widget>[
         Row(
           children: <Widget>[
-            IconButton(onPressed: onBack, icon: const Icon(Icons.arrow_back_rounded, color: _muted)),
+            IconButton(
+              onPressed: onBack,
+              icon: const Icon(Icons.arrow_back_rounded, color: _muted),
+            ),
             const SizedBox(width: 6),
             const Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                Text('Preferensi Arus', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
+                Text(
+                  'Preferensi Arus',
+                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+                ),
                 SizedBox(height: 4),
-                Text('Atur performa unduhan dan perilaku aplikasi.', style: TextStyle(color: _muted, fontSize: 12)),
+                Text(
+                  'Atur performa unduhan dan perilaku aplikasi.',
+                  style: TextStyle(color: _muted, fontSize: 12),
+                ),
               ],
             ),
           ],
@@ -1174,7 +1823,8 @@ class _SettingsView extends StatelessWidget {
         const SizedBox(height: 24),
         _SettingsSection(
           title: 'Performa unduhan',
-          subtitle: 'Gunakan koneksi paralel untuk server yang mendukung Range.',
+          subtitle:
+              'Gunakan koneksi paralel untuk server yang mendukung Range.',
           children: <Widget>[
             _SliderSetting(
               title: 'Koneksi per file',
@@ -1198,13 +1848,16 @@ class _SettingsView extends StatelessWidget {
               divisions: 9,
               valueLabel: '${settings.maxConcurrentDownloads} file',
               onChanged: (value) => _update(
-                () => manager.updateSettings(maxConcurrentDownloads: value.round()),
+                () => manager.updateSettings(
+                  maxConcurrentDownloads: value.round(),
+                ),
                 context,
               ),
             ),
             _SliderSetting(
               title: 'Percobaan ulang',
-              description: 'Retry saat koneksi putus atau server mengembalikan error sementara.',
+              description:
+                  'Retry saat koneksi putus atau server mengembalikan error sementara.',
               value: settings.maxSegmentRetries.toDouble(),
               min: 0,
               max: 10,
@@ -1212,6 +1865,26 @@ class _SettingsView extends StatelessWidget {
               valueLabel: '${settings.maxSegmentRetries} kali',
               onChanged: (value) => _update(
                 () => manager.updateSettings(maxSegmentRetries: value.round()),
+                context,
+              ),
+            ),
+            _SliderSetting(
+              title: 'Batas kecepatan',
+              description:
+                  'Batas total untuk semua unduhan aktif. Nol berarti tanpa batas.',
+              value: (settings.speedLimitBytesPerSecond / (1024 * 1024))
+                  .clamp(0, 100)
+                  .toDouble(),
+              min: 0,
+              max: 100,
+              divisions: 20,
+              valueLabel: settings.speedLimitBytesPerSecond == 0
+                  ? 'Tanpa batas'
+                  : '${(settings.speedLimitBytesPerSecond / (1024 * 1024)).round()} MB/s',
+              onChanged: (value) => _update(
+                () => manager.updateSettings(
+                  speedLimitBytesPerSecond: value.round() * 1024 * 1024,
+                ),
                 context,
               ),
             ),
@@ -1226,28 +1899,59 @@ class _SettingsView extends StatelessWidget {
               title: 'Tampilkan file saat selesai',
               description: 'Buka folder tujuan setelah unduhan selesai.',
               value: settings.revealOnComplete,
-              onChanged: (value) => _update(() => manager.updateSettings(revealOnComplete: value), context),
+              onChanged: (value) => _update(
+                () => manager.updateSettings(revealOnComplete: value),
+                context,
+              ),
             ),
             _SwitchSetting(
               title: 'Jalankan saat login',
               description: 'Siapkan Arus ketika Windows mulai.',
               value: settings.launchAtLogin,
-              onChanged: (value) => _update(() => manager.updateSettings(launchAtLogin: value), context),
+              onChanged: (value) => _update(
+                () => manager.updateSettings(launchAtLogin: value),
+                context,
+              ),
+            ),
+            _SwitchSetting(
+              title: 'Minimalkan ke system tray',
+              description:
+                  'Tutup jendela ke tray agar antrean tetap berjalan di latar.',
+              value: settings.minimizeToTray,
+              onChanged: (value) => _update(
+                () => manager.updateSettings(minimizeToTray: value),
+                context,
+              ),
             ),
           ],
         ),
         const SizedBox(height: 14),
         _SettingsSection(
           title: 'Integrasi browser',
-          subtitle: 'Ekstensi lama tetap tersedia selama bridge Native Messaging dipindahkan.',
+          subtitle:
+              'Terima URL dari ekstensi melalui Native Messaging loopback.',
           children: <Widget>[
             _SwitchSetting(
               title: 'Terima unduhan dari browser',
-              description: 'Status tersimpan di Flutter; bridge lama masih ada di extension-legacy-http/.',
+              description:
+                  'Ekstensi aktif meneruskan URL, cookie, dan referrer ke antrean Arus.',
               value: settings.browserIntegrationEnabled,
               onChanged: (value) => _update(
                 () => manager.updateSettings(browserIntegrationEnabled: value),
                 context,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton.icon(
+                onPressed: () => _update(manager.installNativeHost, context),
+                icon: const Icon(Icons.extension_outlined, size: 16),
+                label: const Text('Pasang ulang native host'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: _secondary,
+                  side: BorderSide(color: _secondary.withValues(alpha: 0.45)),
+                ),
               ),
             ),
             Container(
@@ -1265,8 +1969,12 @@ class _SettingsView extends StatelessWidget {
                   SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      'Unduhan manual dan pemulihan file .part sudah berjalan penuh di Flutter. Integrasi browser memakai adapter Native Messaging pada tahap berikutnya.',
-                      style: TextStyle(color: _muted, fontSize: 11, height: 1.45),
+                      'Ekstensi mengirim URL melalui Native Messaging ke bridge loopback Arus. Pasang host sekali setelah setiap instalasi atau perpindahan folder aplikasi.',
+                      style: TextStyle(
+                        color: _muted,
+                        fontSize: 11,
+                        height: 1.45,
+                      ),
                     ),
                   ),
                 ],
@@ -1277,18 +1985,28 @@ class _SettingsView extends StatelessWidget {
         const SizedBox(height: 14),
         _SettingsSection(
           title: 'Penyimpanan',
-          subtitle: 'Folder baru dibuat otomatis sebelum probe dan setiap retry.',
+          subtitle:
+              'Folder baru dibuat otomatis sebelum probe dan setiap retry.',
           children: <Widget>[
             ListTile(
               contentPadding: EdgeInsets.zero,
               leading: const Icon(Icons.folder_outlined, color: _secondary),
-              title: const Text('Folder unduhan default', style: TextStyle(fontSize: 13)),
-              subtitle: Text(manager.defaultDirectory, style: const TextStyle(color: _muted, fontSize: 11)),
+              title: const Text(
+                'Folder unduhan default',
+                style: TextStyle(fontSize: 13),
+              ),
+              subtitle: Text(
+                manager.defaultDirectory,
+                style: const TextStyle(color: _muted, fontSize: 11),
+              ),
             ),
             ListTile(
               contentPadding: EdgeInsets.zero,
               leading: const Icon(Icons.save_outlined, color: _secondary),
-              title: const Text('Resume metadata', style: TextStyle(fontSize: 13)),
+              title: const Text(
+                'Resume metadata',
+                style: TextStyle(fontSize: 13),
+              ),
               subtitle: const Text(
                 'Queue, status, segmen, dan progress disimpan lokal agar dapat dilanjutkan.',
                 style: TextStyle(color: _muted, fontSize: 11),
@@ -1302,7 +2020,11 @@ class _SettingsView extends StatelessWidget {
 }
 
 class _SettingsSection extends StatelessWidget {
-  const _SettingsSection({required this.title, required this.subtitle, required this.children});
+  const _SettingsSection({
+    required this.title,
+    required this.subtitle,
+    required this.children,
+  });
 
   final String title;
   final String subtitle;
@@ -1316,9 +2038,15 @@ class _SettingsSection extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
-            Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+            Text(
+              title,
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+            ),
             const SizedBox(height: 4),
-            Text(subtitle, style: const TextStyle(color: _muted, fontSize: 11, height: 1.4)),
+            Text(
+              subtitle,
+              style: const TextStyle(color: _muted, fontSize: 11, height: 1.4),
+            ),
             const SizedBox(height: 8),
             ...children,
           ],
@@ -1362,13 +2090,29 @@ class _SliderSetting extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
-                    Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                     const SizedBox(height: 3),
-                    Text(description, style: const TextStyle(color: _muted, fontSize: 11)),
+                    Text(
+                      description,
+                      style: const TextStyle(color: _muted, fontSize: 11),
+                    ),
                   ],
                 ),
               ),
-              Text(valueLabel, style: const TextStyle(color: _primary, fontSize: 12, fontWeight: FontWeight.w700)),
+              Text(
+                valueLabel,
+                style: const TextStyle(
+                  color: _primary,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
             ],
           ),
           Slider(
@@ -1402,8 +2146,14 @@ class _SwitchSetting extends StatelessWidget {
   Widget build(BuildContext context) {
     return SwitchListTile(
       contentPadding: EdgeInsets.zero,
-      title: Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-      subtitle: Text(description, style: const TextStyle(color: _muted, fontSize: 11, height: 1.35)),
+      title: Text(
+        title,
+        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+      ),
+      subtitle: Text(
+        description,
+        style: const TextStyle(color: _muted, fontSize: 11, height: 1.35),
+      ),
       value: value,
       onChanged: onChanged,
       activeThumbColor: _secondary,
@@ -1434,7 +2184,9 @@ class _AddDownloadDialogState extends State<_AddDownloadDialog> {
     super.initState();
     _urlController = TextEditingController();
     _fileController = TextEditingController();
-    _directoryController = TextEditingController(text: widget.manager.defaultDirectory);
+    _directoryController = TextEditingController(
+      text: widget.manager.defaultDirectory,
+    );
   }
 
   @override
@@ -1456,7 +2208,9 @@ class _AddDownloadDialogState extends State<_AddDownloadDialog> {
     try {
       await widget.manager.add(
         url: _urlController.text,
-        fileName: _fileController.text.trim().isEmpty ? null : _fileController.text,
+        fileName: _fileController.text.trim().isEmpty
+            ? null
+            : _fileController.text,
         directory: _directoryController.text,
       );
       if (mounted) {
@@ -1496,8 +2250,8 @@ class _AddDownloadDialogState extends State<_AddDownloadDialog> {
                 ),
                 validator: (value) {
                   final uri = Uri.tryParse(value?.trim() ?? '');
-                  if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https') || uri.host.isEmpty) {
-                    return 'Masukkan URL HTTP atau HTTPS yang valid';
+                  if (uri == null || !isSupportedUrl(uri.toString())) {
+                    return 'Masukkan URL HTTP, HTTPS, atau FTP yang valid';
                   }
                   return null;
                 },
@@ -1524,7 +2278,10 @@ class _AddDownloadDialogState extends State<_AddDownloadDialog> {
               ),
               if (_formError != null) ...<Widget>[
                 const SizedBox(height: 10),
-                Text(_formError!, style: const TextStyle(color: _error, fontSize: 11)),
+                Text(
+                  _formError!,
+                  style: const TextStyle(color: _error, fontSize: 11),
+                ),
               ],
             ],
           ),
@@ -1538,10 +2295,17 @@ class _AddDownloadDialogState extends State<_AddDownloadDialog> {
         FilledButton.icon(
           onPressed: _saving ? null : _submit,
           icon: _saving
-              ? const SizedBox(width: 15, height: 15, child: CircularProgressIndicator(strokeWidth: 2))
+              ? const SizedBox(
+                  width: 15,
+                  height: 15,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
               : const Icon(Icons.download_rounded, size: 17),
           label: const Text('Mulai unduh'),
-          style: FilledButton.styleFrom(backgroundColor: _primary, foregroundColor: _background),
+          style: FilledButton.styleFrom(
+            backgroundColor: _primary,
+            foregroundColor: _background,
+          ),
         ),
       ],
     );

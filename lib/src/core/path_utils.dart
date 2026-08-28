@@ -37,41 +37,201 @@ String baseName(String path) {
   return slash < 0 ? path : path.substring(slash + 1);
 }
 
+const int _defaultSafeFileNameLength = 120;
+const int _conservativeWindowsPathLength = 240;
+const String _downloadMetadataSuffix = '.part.meta.json';
+const Set<String> _reservedWindowsNames = <String>{
+  'CON',
+  'PRN',
+  'AUX',
+  'NUL',
+  'COM1',
+  'COM2',
+  'COM3',
+  'COM4',
+  'COM5',
+  'COM6',
+  'COM7',
+  'COM8',
+  'COM9',
+  'LPT1',
+  'LPT2',
+  'LPT3',
+  'LPT4',
+  'LPT5',
+  'LPT6',
+  'LPT7',
+  'LPT8',
+  'LPT9',
+};
+
 String safeFileName(String value, [String fallback = 'download.bin']) {
-  final lastPart = baseName(value).trim();
-  final safe = lastPart
-      .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1F]'), '_')
-      .replaceAll(RegExp(r'[. ]+$'), '')
-      .trim();
-  return safe.isEmpty ? fallback : safe;
+  return _sanitizeFileName(value, fallback, _defaultSafeFileNameLength);
+}
+
+String safeFileNameForDirectory(
+  String value,
+  String directory, [
+  String fallback = 'download.bin',
+]) {
+  return _sanitizeFileName(value, fallback, maxSafeFileNameLength(directory));
+}
+
+int maxSafeFileNameLength(String directory) {
+  if (!Platform.isWindows) {
+    return 180;
+  }
+  final available =
+      _conservativeWindowsPathLength -
+      directory.length -
+      Platform.pathSeparator.length -
+      _downloadMetadataSuffix.length;
+  return available.clamp(16, _defaultSafeFileNameLength).toInt();
+}
+
+String _sanitizeFileName(String value, String fallback, int maxLength) {
+  String sanitize(String input) {
+    return input
+        .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1F]'), '_')
+        .replaceAll(RegExp(r'[. ]+$'), '')
+        .trim();
+  }
+
+  var safe = sanitize(baseName(value).trim());
+  if (safe.isEmpty) {
+    safe = sanitize(fallback);
+  }
+  if (safe.isEmpty) {
+    safe = 'download.bin';
+  }
+
+  final dot = safe.indexOf('.');
+  final stem = (dot > 0 ? safe.substring(0, dot) : safe).toUpperCase();
+  if (_reservedWindowsNames.contains(stem)) {
+    safe = '_$safe';
+  }
+
+  return _truncateFileName(
+    _trimTrailingNameCharacters(safe),
+    math.max(1, maxLength),
+  );
+}
+
+String _truncateFileName(String value, int maxLength) {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  final dot = value.lastIndexOf('.');
+  final extensionLength = value.length - dot;
+  if (dot > 0 && dot < value.length - 1 && extensionLength < maxLength) {
+    final extension = value.substring(dot);
+    final stemLength = maxLength - extension.length;
+    final stem = _trimTrailingNameCharacters(value.substring(0, stemLength));
+    return (stem.isEmpty ? 'download' : stem) + extension;
+  }
+
+  final prefix = _trimTrailingNameCharacters(value.substring(0, maxLength));
+  return prefix.isEmpty ? 'download' : prefix;
+}
+
+String _trimTrailingNameCharacters(String value) {
+  return value.replaceAll(RegExp(r'[. ]+$'), '').trim();
 }
 
 String nameFromUrl(String url, [String fallback = 'download.bin']) {
   try {
     final uri = Uri.parse(url);
+    for (final key in const <String>['filename', 'file', 'name']) {
+      final queryName = uri.queryParameters[key]?.trim();
+      if (queryName != null && queryName.isNotEmpty) {
+        return queryName;
+      }
+    }
     if (uri.pathSegments.isEmpty) {
       return fallback;
     }
-    return Uri.decodeComponent(uri.pathSegments.last);
+    final candidate = Uri.decodeComponent(uri.pathSegments.last).trim();
+    return isLikelyOpaqueUrlFileName(candidate) ? fallback : candidate;
   } catch (_) {
     return fallback;
   }
 }
 
-String uniqueFilePath(String directory, String preferredName, {Iterable<String> reserved = const <String>[]}) {
+/// Returns true for opaque IDs commonly used by temporary download proxies.
+/// They are technically valid path segments, but make poor user-facing file
+/// names and can be hundreds of characters long.
+bool isLikelyOpaqueUrlFileName(String value) {
+  final name = baseName(value).trim();
+  if (name.length < 48 || !RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(name)) {
+    return false;
+  }
+  final dot = name.lastIndexOf('.');
+  final extensionLength = dot >= 0 ? name.length - dot - 1 : 0;
+  return dot < 0 || extensionLength > 8;
+}
+
+/// Extracts the filename from an HTTP Content-Disposition header.
+/// Supports both the modern RFC 5987 `filename*` form and the older
+/// `filename` form.
+String? fileNameFromContentDisposition(String? header) {
+  if (header == null || header.trim().isEmpty) {
+    return null;
+  }
+  final encoded = RegExp(
+    r'''(?:^|;)\s*filename\*\s*=\s*(?:UTF-8'')?([^;]+)''',
+    caseSensitive: false,
+  ).firstMatch(header);
+  final plain = RegExp(
+    r'''(?:^|;)\s*filename\s*=\s*("[^"]*"|[^;]+)''',
+    caseSensitive: false,
+  ).firstMatch(header);
+  var value = (encoded?.group(1) ?? plain?.group(1))?.trim();
+  if (value == null || value.isEmpty) {
+    return null;
+  }
+  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+    value = value.substring(1, value.length - 1);
+  }
+  value = value.replaceAll(r'\"', '"').trim();
+  if (encoded != null) {
+    try {
+      value = Uri.decodeComponent(value);
+    } catch (_) {
+      // Keep the original value if a malformed proxy header is encountered.
+    }
+  }
+  return value!.isEmpty ? null : value;
+}
+
+String uniqueFilePath(
+  String directory,
+  String preferredName, {
+  Iterable<String> reserved = const <String>[],
+}) {
   final reservedPaths = reserved.map(_normalizeForComparison).toSet();
-  var candidate = joinPath(directory, preferredName);
+  final boundedName = safeFileNameForDirectory(preferredName, directory);
+  final maxLength = maxSafeFileNameLength(directory);
+  var candidate = joinPath(directory, boundedName);
   if (!_pathExists(candidate, reservedPaths)) {
     return candidate;
   }
 
-  final name = baseName(preferredName);
+  final name = baseName(boundedName);
   final dot = name.lastIndexOf('.');
   final stem = dot > 0 ? name.substring(0, dot) : name;
   final extension = dot > 0 ? name.substring(dot) : '';
   var index = 1;
   while (true) {
-    candidate = joinPath(directory, '$stem ($index)$extension');
+    final suffix = ' ($index)$extension';
+    final stemLength = math.max(1, maxLength - suffix.length);
+    final boundedStem = stem.length > stemLength
+        ? stem.substring(0, stemLength)
+        : stem;
+    candidate = joinPath(
+      directory,
+      _trimTrailingNameCharacters('$boundedStem$suffix'),
+    );
     if (!_pathExists(candidate, reservedPaths)) {
       return candidate;
     }
@@ -99,13 +259,21 @@ String defaultDownloadDirectory() {
 String appDataDirectory() {
   final environment = Platform.environment;
   if (Platform.isWindows) {
-    final base = environment['APPDATA'] ?? environment['LOCALAPPDATA'] ?? _homeDirectory();
+    final base =
+        environment['APPDATA'] ??
+        environment['LOCALAPPDATA'] ??
+        _homeDirectory();
     return joinPath(base ?? Directory.current.path, 'Arus');
   }
   if (Platform.isMacOS) {
-    return joinPath(_homeDirectory() ?? Directory.current.path, 'Library/Application Support/Arus');
+    return joinPath(
+      _homeDirectory() ?? Directory.current.path,
+      'Library/Application Support/Arus',
+    );
   }
-  final base = environment['XDG_CONFIG_HOME'] ?? joinPath(_homeDirectory() ?? Directory.current.path, '.config');
+  final base =
+      environment['XDG_CONFIG_HOME'] ??
+      joinPath(_homeDirectory() ?? Directory.current.path, '.config');
   return joinPath(base, 'arus');
 }
 
@@ -116,17 +284,15 @@ String? _homeDirectory() {
     if (profile != null && profile.isNotEmpty) {
       return profile;
     }
-    final home = '${environment['HOMEDRIVE'] ?? ''}${environment['HOMEPATH'] ?? ''}';
+    final home =
+        '${environment['HOMEDRIVE'] ?? ''}${environment['HOMEPATH'] ?? ''}';
     return home.trim().isEmpty ? null : home;
   }
   return environment['HOME'];
 }
 
 String formatBytes(int bytes) {
-  if (bytes < 1024) {
-    return '$bytes B';
-  }
-  const units = <String>['KB', 'MB', 'GB', 'TB'];
+  const units = <String>['B', 'KB', 'MB', 'GB', 'TB'];
   var value = bytes.toDouble();
   var unit = 0;
   while (value >= 1024 && unit < units.length - 1) {

@@ -5,6 +5,8 @@ import 'dart:math' as math;
 
 import '../core/path_utils.dart';
 import '../models/download_models.dart';
+import 'download_worker.dart';
+import 'rate_limiter.dart';
 
 class DownloadAbortException implements Exception {
   const DownloadAbortException(this.reason);
@@ -12,11 +14,14 @@ class DownloadAbortException implements Exception {
   final String reason;
 
   @override
-  String toString() => reason == 'paused' ? 'Download paused' : 'Download cancelled';
+  String toString() =>
+      reason == 'paused' ? 'Download paused' : 'Download cancelled';
 }
 
 class RangeSupportLostException implements Exception {
-  const RangeSupportLostException([this.message = 'Server no longer supports byte ranges']);
+  const RangeSupportLostException([
+    this.message = 'Server no longer supports byte ranges',
+  ]);
 
   final String message;
 
@@ -33,7 +38,7 @@ class DownloadHttpException implements Exception {
   String toString() => 'Server returned HTTP $statusCode';
 }
 
-class SegmentedDownloader {
+class SegmentedDownloader implements DownloadWorker {
   SegmentedDownloader({
     required this.id,
     required this.url,
@@ -45,6 +50,8 @@ class SegmentedDownloader {
     required this.maxRetries,
     required this.onProgress,
     this.requestHeaders,
+    this.rateLimiter,
+    this.onFileName,
   });
 
   final String id;
@@ -56,7 +63,9 @@ class SegmentedDownloader {
   final int minSegmentSizeBytes;
   final int maxRetries;
   final Map<String, String>? requestHeaders;
-  final void Function(DownloadProgress progress) onProgress;
+  final DownloadProgressCallback onProgress;
+  final DownloadRateLimiter? rateLimiter;
+  final Future<void> Function(String fileName)? onFileName;
 
   HttpClient? _client;
   Future<void> _metaChain = Future<void>.value();
@@ -69,9 +78,11 @@ class SegmentedDownloader {
   DateTime _startedAt = DateTime.now();
   DateTime _lastProgressAt = DateTime.now();
   int _lastProgressBytes = 0;
+  int _lastSpeedBytesPerSecond = 0;
   String? _abortReason;
   bool _finalized = false;
 
+  @override
   Future<void> start() async {
     _client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 30)
@@ -81,6 +92,7 @@ class SegmentedDownloader {
     _startedAt = DateTime.now();
     _lastProgressAt = _startedAt;
     _lastProgressBytes = 0;
+    _lastSpeedBytesPerSecond = 0;
     _abortReason = null;
     _finalized = false;
 
@@ -91,8 +103,14 @@ class SegmentedDownloader {
       _totalBytes = probe.totalBytes;
       _etag = probe.etag;
       _lastModified = probe.lastModified;
+      final suggestedFileName = probe.suggestedFileName;
+      if (suggestedFileName != null) {
+        await onFileName?.call(suggestedFileName);
+      }
 
-      if (probe.supportsRanges && probe.totalBytes != null && probe.totalBytes! > 0) {
+      if (probe.supportsRanges &&
+          probe.totalBytes != null &&
+          probe.totalBytes! > 0) {
         try {
           await _downloadSegmented(probe.totalBytes!);
         } on RangeSupportLostException {
@@ -120,11 +138,13 @@ class SegmentedDownloader {
     }
   }
 
+  @override
   void pause() {
     _abortReason = 'paused';
     _client?.close(force: true);
   }
 
+  @override
   void cancel() {
     _abortReason = 'cancelled';
     _client?.close(force: true);
@@ -139,7 +159,10 @@ class SegmentedDownloader {
       await _preallocate(totalBytes);
       await _persistMeta(force: true);
     } else {
-      _downloadedBytes = _segments.fold<int>(0, (sum, segment) => sum + segment.downloaded);
+      _downloadedBytes = _segments.fold<int>(
+        0,
+        (sum, segment) => sum + segment.downloaded,
+      );
     }
 
     _emitProgress();
@@ -197,7 +220,9 @@ class SegmentedDownloader {
       },
     );
 
-    if (response.statusCode == 200 || response.statusCode == 401 || response.statusCode == 403) {
+    if (response.statusCode == 200 ||
+        response.statusCode == 401 ||
+        response.statusCode == 403) {
       await response.drain<void>();
       if (response.statusCode == 200) {
         throw const RangeSupportLostException();
@@ -211,7 +236,25 @@ class SegmentedDownloader {
       throw DownloadHttpException(response.statusCode);
     }
 
+    final contentRange = response.headers.value(HttpHeaders.contentRangeHeader);
+    final rangeMatch = contentRange == null
+        ? null
+        : RegExp(r'^bytes\s+(\d+)-(\d+)/(\d+|\*)$').firstMatch(contentRange);
+    if (rangeMatch == null ||
+        int.tryParse(rangeMatch.group(1)!) != start ||
+        int.tryParse(rangeMatch.group(2)!) != segment.end ||
+        (rangeMatch.group(3) != '*' &&
+            int.tryParse(rangeMatch.group(3)!) != _totalBytes)) {
+      await response.drain<void>();
+      throw const RangeSupportLostException(
+        'Server returned an invalid Content-Range',
+      );
+    }
+
     var position = start;
+    // FileMode.append preserves the preallocated file. RandomAccessFile's
+    // setPosition() then selects the segment's disjoint range before every
+    // write; using writeOnly here would truncate the file for each worker.
     final handle = await File(tempPath).open(mode: FileMode.append);
     try {
       await for (final chunk in response) {
@@ -223,14 +266,33 @@ class SegmentedDownloader {
         if (capacity <= 0) {
           break;
         }
-        final usable = chunk.length > capacity ? chunk.sublist(0, capacity) : chunk;
-        await handle.setPosition(position);
-        await handle.writeFrom(usable);
-        position += usable.length;
-        segment.downloaded = math.min(segment.length, segment.downloaded + usable.length);
-        _downloadedBytes += usable.length;
-        _emitProgress();
-        if (usable.length < chunk.length || segment.downloaded >= segment.length) {
+        final usableLength = math.min(chunk.length, capacity);
+        var chunkOffset = 0;
+        while (chunkOffset < usableLength) {
+          final sliceLength = math.min(
+            usableLength - chunkOffset,
+            rateLimiter?.suggestedChunkBytes ??
+                DownloadRateLimiter.maxChunkBytes,
+          );
+          final slice = chunk.sublist(chunkOffset, chunkOffset + sliceLength);
+          await rateLimiter?.throttle(
+            slice.length,
+            isCancelled: () => _abortReason != null,
+          );
+          _throwIfAborted();
+          await handle.setPosition(position);
+          await handle.writeFrom(slice);
+          position += slice.length;
+          chunkOffset += slice.length;
+          segment.downloaded = math.min(
+            segment.length,
+            segment.downloaded + slice.length,
+          );
+          _downloadedBytes += slice.length;
+          _emitProgress();
+        }
+        if (usableLength < chunk.length ||
+            segment.downloaded >= segment.length) {
           break;
         }
       }
@@ -239,7 +301,9 @@ class SegmentedDownloader {
     }
 
     if (segment.downloaded < segment.length) {
-      throw StateError('Connection closed before segment ${segment.index + 1} completed');
+      throw StateError(
+        'Connection closed before segment ${segment.index + 1} completed',
+      );
     }
     await _persistMeta(force: true);
   }
@@ -254,7 +318,9 @@ class SegmentedDownloader {
         return;
       } catch (error) {
         await _closeFile();
-        if (_abortReason != null || attempt >= maxRetries || !_isRetryable(error)) {
+        if (_abortReason != null ||
+            attempt >= maxRetries ||
+            !_isRetryable(error)) {
           rethrow;
         }
         attempt += 1;
@@ -302,7 +368,9 @@ class SegmentedDownloader {
       _totalBytes = responseTotal;
     }
 
-    final handle = await File(tempPath).open(mode: resumed ? FileMode.append : FileMode.write);
+    final handle = await File(
+      tempPath,
+    ).open(mode: resumed ? FileMode.append : FileMode.write);
     var position = resumed ? existing : 0;
     try {
       await for (final chunk in response) {
@@ -310,11 +378,26 @@ class SegmentedDownloader {
         if (chunk.isEmpty) {
           continue;
         }
-        await handle.setPosition(position);
-        await handle.writeFrom(chunk);
-        position += chunk.length;
-        _downloadedBytes += chunk.length;
-        _emitProgress();
+        var chunkOffset = 0;
+        while (chunkOffset < chunk.length) {
+          final sliceLength = math.min(
+            chunk.length - chunkOffset,
+            rateLimiter?.suggestedChunkBytes ??
+                DownloadRateLimiter.maxChunkBytes,
+          );
+          final slice = chunk.sublist(chunkOffset, chunkOffset + sliceLength);
+          await rateLimiter?.throttle(
+            slice.length,
+            isCancelled: () => _abortReason != null,
+          );
+          _throwIfAborted();
+          await handle.setPosition(position);
+          await handle.writeFrom(slice);
+          position += slice.length;
+          chunkOffset += slice.length;
+          _downloadedBytes += slice.length;
+          _emitProgress();
+        }
       }
     } finally {
       await handle.close();
@@ -337,11 +420,9 @@ class SegmentedDownloader {
     }
 
     try {
-      final response = await _request(
-        'GET',
-        uri,
-        const <String, String>{'Range': 'bytes=0-0'},
-      );
+      final response = await _request('GET', uri, const <String, String>{
+        'Range': 'bytes=0-0',
+      });
       final range = ProbeResult.fromResponse(uri, response, fallback: head);
       await response.drain<void>();
       if (response.statusCode == 206) {
@@ -365,14 +446,18 @@ class SegmentedDownloader {
     final request = await client.openUrl(method, uri);
     request.followRedirects = true;
     request.maxRedirects = 5;
-    request.headers.set(HttpHeaders.userAgentHeader, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36');
+    request.headers.set(
+      HttpHeaders.userAgentHeader,
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36',
+    );
     request.headers.set(HttpHeaders.acceptHeader, '*/*');
     try {
       request.headers.set(HttpHeaders.refererHeader, '${uri.origin}/');
     } catch (_) {
       // Uri is already parsed, but keep the request resilient to unusual URLs.
     }
-    for (final entry in requestHeaders?.entries ?? const <MapEntry<String, String>>[]) {
+    for (final entry
+        in requestHeaders?.entries ?? const <MapEntry<String, String>>[]) {
       request.headers.set(entry.key, entry.value);
     }
     for (final entry in headers.entries) {
@@ -390,10 +475,13 @@ class SegmentedDownloader {
     try {
       final decoded = jsonDecode(await metaFile.readAsString());
       final version = decoded is Map ? decoded['version'] : null;
-      if (decoded is! Map || (version != 1 && version != 2) || decoded['mode'] != 'segmented') {
+      if (decoded is! Map ||
+          (version != 1 && version != 2) ||
+          decoded['mode'] != 'segmented') {
         return false;
       }
-      if (decoded['totalBytes'] != totalBytes || decoded['url'] != _resolvedUrl) {
+      if (decoded['totalBytes'] != totalBytes ||
+          decoded['url'] != _resolvedUrl) {
         return false;
       }
       final rawSegments = decoded['segments'];
@@ -402,7 +490,9 @@ class SegmentedDownloader {
       }
       final segments = rawSegments
           .whereType<Map>()
-          .map((item) => DownloadSegment.fromJson(Map<String, dynamic>.from(item)))
+          .map(
+            (item) => DownloadSegment.fromJson(Map<String, dynamic>.from(item)),
+          )
           .toList();
       if (!_coversFullFile(segments, totalBytes)) {
         return false;
@@ -519,7 +609,9 @@ class SegmentedDownloader {
     }
     final length = await file.length();
     if (_totalBytes != null && length != _totalBytes) {
-      throw StateError('File size mismatch: expected $_totalBytes bytes, got $length');
+      throw StateError(
+        'File size mismatch: expected $_totalBytes bytes, got $length',
+      );
     }
   }
 
@@ -542,17 +634,22 @@ class SegmentedDownloader {
   }
 
   Map<String, String> _validatorHeaders() => <String, String>{
-        if (_etag != null && !_etag!.startsWith('W/')) 'If-Range': _etag!,
-        if (_etag == null && _lastModified != null) 'If-Range': _lastModified!,
-      };
+    if (_etag != null && !_etag!.startsWith('W/')) 'If-Range': _etag!,
+    if (_etag == null && _lastModified != null) 'If-Range': _lastModified!,
+  };
 
   void _emitProgress() {
     final now = DateTime.now();
     final elapsed = now.difference(_lastProgressAt).inMilliseconds;
-    final speed = elapsed <= 0
-        ? 0
-        : math.max(0, ((_downloadedBytes - _lastProgressBytes) * 1000 / elapsed).round());
-    if (elapsed >= 200 || _downloadedBytes == 0) {
+    var speed = _lastSpeedBytesPerSecond;
+    if (_downloadedBytes == 0) {
+      speed = 0;
+    } else if (elapsed >= 200) {
+      speed = math.max(
+        0,
+        ((_downloadedBytes - _lastProgressBytes) * 1000 / elapsed).round(),
+      );
+      _lastSpeedBytesPerSecond = speed;
       _lastProgressAt = now;
       _lastProgressBytes = _downloadedBytes;
     }
@@ -566,7 +663,9 @@ class SegmentedDownloader {
         percent: total == null || total == 0
             ? 0
             : (_downloadedBytes / total * 100).clamp(0, 100).toDouble(),
-        segments: _segments.isEmpty ? null : _segments.map((segment) => segment.copy()).toList(),
+        segments: _segments.isEmpty
+            ? null
+            : _segments.map((segment) => segment.copy()).toList(),
       ),
     );
   }
@@ -586,22 +685,39 @@ class ProbeResult {
     required this.totalBytes,
     required this.etag,
     required this.lastModified,
+    required this.suggestedFileName,
   });
 
   ProbeResult.empty()
-      : url = Uri(),
-        supportsRanges = false,
-        totalBytes = null,
-        etag = null,
-        lastModified = null;
+    : url = Uri(),
+      supportsRanges = false,
+      totalBytes = null,
+      etag = null,
+      lastModified = null,
+      suggestedFileName = null;
 
-  factory ProbeResult.fromResponse(Uri url, HttpClientResponse response, {ProbeResult? fallback}) {
+  factory ProbeResult.fromResponse(
+    Uri url,
+    HttpClientResponse response, {
+    ProbeResult? fallback,
+  }) {
+    var finalUrl = url;
+    for (final redirect in response.redirects) {
+      finalUrl = finalUrl.resolveUri(redirect.location);
+    }
     return ProbeResult(
-      url: url,
+      url: finalUrl,
       supportsRanges: response.statusCode == 206,
       totalBytes: _totalFromResponse(response, 0) ?? fallback?.totalBytes,
       etag: response.headers.value(HttpHeaders.etagHeader) ?? fallback?.etag,
-      lastModified: response.headers.value(HttpHeaders.lastModifiedHeader) ?? fallback?.lastModified,
+      lastModified:
+          response.headers.value(HttpHeaders.lastModifiedHeader) ??
+          fallback?.lastModified,
+      suggestedFileName:
+          fileNameFromContentDisposition(
+            response.headers.value(HttpHeaders.contentDisposition),
+          ) ??
+          fallback?.suggestedFileName,
     );
   }
 
@@ -610,21 +726,25 @@ class ProbeResult {
   final int? totalBytes;
   final String? etag;
   final String? lastModified;
+  final String? suggestedFileName;
 
   ProbeResult copyWith({Uri? url, bool? supportsRanges}) => ProbeResult(
-        url: url ?? this.url,
-        supportsRanges: supportsRanges ?? this.supportsRanges,
-        totalBytes: totalBytes,
-        etag: etag,
-        lastModified: lastModified,
-      );
+    url: url ?? this.url,
+    supportsRanges: supportsRanges ?? this.supportsRanges,
+    totalBytes: totalBytes,
+    etag: etag,
+    lastModified: lastModified,
+    suggestedFileName: suggestedFileName,
+  );
 }
 
 bool _coversFullFile(List<DownloadSegment> segments, int totalBytes) {
   final ordered = [...segments]..sort((a, b) => a.start.compareTo(b.start));
   var expected = 0;
   for (final segment in ordered) {
-    if (segment.start != expected || segment.end < segment.start || segment.end >= totalBytes) {
+    if (segment.start != expected ||
+        segment.end < segment.start ||
+        segment.end >= totalBytes) {
       return false;
     }
     segment.downloaded = segment.downloaded.clamp(0, segment.length).toInt();
@@ -664,7 +784,9 @@ bool _isRetryable(Object error) {
       message.contains('socket hang up');
 }
 
-Duration _retryDelay(int attempt) => Duration(milliseconds: math.min(8000, 300 * math.pow(2, attempt - 1).toInt()));
+Duration _retryDelay(int attempt) => Duration(
+  milliseconds: math.min(8000, 300 * math.pow(2, attempt - 1).toInt()),
+);
 
 Future<void> _deleteFileWithRetry(String path) async {
   final file = File(path);

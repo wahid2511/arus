@@ -31,6 +31,10 @@ dependencies:
   flutter:
     sdk: flutter
 
+  local_notifier: ^0.1.6
+  tray_manager: ^0.5.3
+  window_manager: ^0.5.2
+
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
 
@@ -58,6 +62,7 @@ flutter:
 
   assets:
     - assets/arus_logo.png
+    - windows/runner/resources/app_icon.ico
 
   # To add assets to your application, add an assets section, like this:
   # assets:

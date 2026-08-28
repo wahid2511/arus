@@ -1,7 +1,9 @@
 # Arus Browser Extension
 
-Manifest V3 companion for Chrome and Firefox. Hands downloads to the Arus desktop
-app over **Native Messaging** (stdio length-prefixed JSON → local named pipe).
+Manifest V3 companion for Chrome and Firefox. The extension is kept as a
+separate browser companion while the desktop application is migrated to
+Flutter. Its browser-to-desktop handoff uses **Native Messaging** (stdio
+length-prefixed JSON → authenticated loopback bridge).
 
 > **This is the only active companion.** Do not load `extension-legacy-http/`
 > (old HTTP bridge) — that folder is historical only.
@@ -17,22 +19,17 @@ npm run build:firefox
 npm run package          # zips + web-ext Firefox artifact → artifacts/
 ```
 
-From the repo root:
-
-```bash
-npm run build:extension:chrome
-npm run build:extension:firefox
-npm run package:extension
-```
-
 ## Install
 
-1. Start **Arus** (registers the native host `com.arus.app` automatically when
-   Browser integration is enabled).
+1. Build the extension using the commands above.
 2. Chrome / Edge / Brave → `chrome://extensions` → Developer mode → **Load unpacked**
    → select `extension/dist/chrome`.
 3. Firefox → `about:debugging` → This Firefox → **Load Temporary Add-on**
    → select `extension/dist/firefox/manifest.json`.
+
+The Flutter desktop runner exposes the authenticated loopback bridge and can
+also act as the Native Messaging host. Open Arus → Pengaturan → Pasang ulang
+native host once per installation, then reload the extension.
 
 Stable Chrome unpacked ID (from manifest `key`): `pnmkpgoolmmekpecphmakboegpajanmc`  
 Firefox ID: `arus@arus.app`

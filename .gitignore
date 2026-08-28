@@ -3,6 +3,7 @@ dist
 extension/node_modules
 extension/dist
 extension/artifacts
+artifacts/
 .idea
 *.log
 *.local
